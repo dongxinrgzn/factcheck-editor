@@ -286,8 +286,10 @@ body {
       </div>
     </div>
     <div class="kb-entry-list" id="kb-entries">
-      <h3>知识库词条</h3>
-      <div class="empty-state">暂无词条</div>
+      <h3>知识库 · 待审词条
+        <button class="btn-secondary" id="btn-refresh-pending" style="font-size:12px;padding:2px 8px;float:right;">刷新</button>
+      </h3>
+      <div id="pending-list"><div class="empty-state">点"刷新"加载待审词条</div></div>
     </div>
   </div>
 
@@ -495,10 +497,16 @@ body {
       if (data.all_low_confidence) {
         html += '<div class="correction-box">未找到精确匹配，疑似讹误/辑佚</div>';
       }
-      if (data.math_info) {
-        html += '<div class="report-section"><strong>算书指纹：</strong>' +
-          escapeHtml(JSON.stringify(data.math_info)) + '</div>';
+      if (data.math_info && data.math_info.suspected_book) {
+        html += '<div class="report-section" style="color:#666;font-size:13px;">' +
+          '推测出处：' + escapeHtml(data.math_info.suspected_book) +
+          (data.math_info.auto_detected ? '（自动识别）' : '') + '</div>';
       }
+    }
+
+    if (data.draftCard) {
+      html += '<div class="report-section" style="color:#2e7d32;">★ 该事实已自动提议入知识库（待审核），词条：' +
+        escapeHtml(data.draftCard.title || '') + '</div>';
     }
 
     box.innerHTML = html || '<div class="empty-state">无报告数据</div>';
@@ -553,13 +561,17 @@ body {
             '<br><button class="btn-secondary" onclick="window._submitDraft()">提议入库</button></div>';
         }
       } else if (state.mode === 'ancient') {
-        // 古文查证
+        // 古文查证（后端自动识别类型：数学古籍/诗文/科学古籍等）
         var ad = await apiFetch('/api/verify-ancient', {
           method: 'POST',
-          body: JSON.stringify({ text: text, category: 'general' })
+          body: JSON.stringify({ text: text, category: 'auto' })
         });
         renderReport(ad);
-        renderResults([]);
+        // 把 ctext/古诗文网等命中来源展示到检索结果区
+        var ancientSources = (ad.matches || []).map(function(m) {
+          return { title: m.book || m.edition || '', url: m.url || '#', snippet: m.text || '', official_tag: m.edition === 'ctext' };
+        });
+        renderResults(ancientSources);
       } else if (state.mode === 'batch') {
         // 批量查证
         var lines = text.split('\n').filter(function(l) { return l.trim(); });
@@ -612,28 +624,75 @@ body {
     $('report-area').innerHTML = '<div class="empty-state">批量结果见中栏</div>';
   }
 
-  // 提议入库
+  // 提议入库（后端自动核查提取事实并生成词条草稿）
   window._submitDraft = async function() {
     var text = $('input-text').value.trim();
+    if (!text) { alert('请先输入要入库的内容'); return; }
     try {
       var r = await apiFetch('/api/kb/submit', {
         method: 'POST',
-        body: JSON.stringify({
-          card: {
-            title: text,
-            aliases: [],
-            category: 'auto',
-            facts: [],
-            references: []
-          },
-          action: 'submit'
-        })
+        body: JSON.stringify({ text: text, action: 'submit' })
       });
-      alert('已提议入库，待管理员审核：' + JSON.stringify(r));
+      alert('已提议入库，待管理员审核。\n词条：' + (r.card && r.card.title) +
+        '\n事实条数：' + (r.card && r.card.facts ? r.card.facts.length : 0));
     } catch (e) {
       alert('入库失败：' + e.message);
     }
   };
+
+  // 加载待审词条
+  async function loadPending() {
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'list_pending' })
+      });
+      var items = r.items || [];
+      var box = $('pending-list');
+      if (!items.length) {
+        box.innerHTML = '<div class="empty-state">暂无待审词条</div>';
+        return;
+      }
+      box.innerHTML = items.map(function(it) {
+        var facts = (it.facts || []).map(function(f) {
+          return '<div style="font-size:12px;color:#555;margin:2px 0;">· ' +
+            escapeHtml(f.label || '') + ' → <b>' + escapeHtml((f.value || '').slice(0, 90)) + '</b></div>';
+        }).join('');
+        return '<div class="result-item" style="margin-bottom:6px;">' +
+          '<div class="title">' + escapeHtml(it.title || '(无标题)') +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;" ' +
+          'onclick="window._approve(this, \'' + escapeHtml(it.key) + '\')">通过入库</button></div>' +
+          facts + '</div>';
+      }).join('');
+    } catch (e) {
+      $('pending-list').innerHTML = '<div class="error-msg">加载失败：' + escapeHtml(e.message) + '</div>';
+    }
+  }
+
+  // 审核通过
+  window._approve = async function(btn, key) {
+    btn.disabled = true;
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'list_pending' })
+      });
+      var it = (r.items || []).find(function(x) { return x.key === key; });
+      if (!it) { alert('词条不存在或已处理'); loadPending(); return; }
+      var parts = key.split(':'); // kb:pending:时间戳:slug
+      await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'approve', slug: it.id || parts[3], timestamp: parts[2], card: it })
+      });
+      alert('已审核入库：' + (it.title || ''));
+      loadPending();
+    } catch (e) {
+      alert('审核失败：' + e.message);
+      btn.disabled = false;
+    }
+  };
+
+  $('btn-refresh-pending').onclick = loadPending;
 
   // 清空
   $('btn-clear').onclick = function() {

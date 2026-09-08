@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>编辑校次事实核查助手</title>
+<style>
+:root {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --border: #e1e4e8;
+  --text: #24292e;
+  --muted: #6a737d;
+  --accent: #0366d6;
+  --green: #28a745;
+  --yellow: #ffd33d;
+  --red: #d73a49;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+/* 顶栏 */
+.topbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: var(--shadow);
+}
+.topbar h1 { font-size: 16px; font-weight: 600; }
+.topbar .config { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.topbar input[type="text"] {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  width: 200px;
+}
+.topbar button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.topbar button:hover { background: #f0f0f0; }
+/* 三栏 */
+.main {
+  display: grid;
+  grid-template-columns: 40% 30% 30%;
+  gap: 1px;
+  background: var(--border);
+  height: calc(100vh - 48px);
+}
+.panel {
+  background: var(--panel);
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.panel h2 {
+  font-size: 14px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+/* 待查文本栏 */
+.text-input {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.text-input textarea {
+  flex: 1;
+  min-height: 200px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 14px;
+  resize: none;
+}
+.mode-switch {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+.mode-switch label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.btn-row { display: flex; gap: 8px; margin-top: 8px; }
+.btn-primary {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-primary:hover { opacity: 0.9; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary {
+  padding: 8px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.kb-entry-list {
+  margin-top: 16px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+.kb-entry-list h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.kb-entry-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.kb-entry-item:hover { background: #f0f0f0; }
+/* 检索结果栏 */
+.result-item {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.result-item .title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.result-item .title a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.result-item .title a:hover { text-decoration: underline; }
+.tag-official {
+  background: var(--green);
+  color: white;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.tag-unofficial {
+  background: #999;
+  color: white;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.result-item .snippet {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.result-item .score {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.source-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.source-tabs button {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.source-tabs button.active { background: var(--accent); color: white; border-color: var(--accent); }
+/* 核查报告栏 */
+.report-section {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.rating-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.rating-high { background: #e6f4ea; color: var(--green); }
+.rating-medium { background: #fff8e1; color: #b8860b; }
+.rating-low { background: #ffebee; color: var(--red); }
+.correction-box {
+  background: #fff8e1;
+  border-left: 3px solid var(--yellow);
+  padding: 8px;
+  margin-top: 8px;
+}
+.ref-link {
+  display: block;
+  color: var(--accent);
+  font-size: 12px;
+  margin-top: 4px;
+  text-decoration: none;
+}
+.ref-link:hover { text-decoration: underline; }
+/* 词条卡 */
+.kb-card {
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.kb-card h3 { font-size: 15px; margin-bottom: 8px; }
+.kb-fact {
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.kb-fact .label { font-weight: 600; }
+.kb-fact .value { color: var(--text); }
+.kb-fact .source { font-size: 12px; color: var(--muted); }
+/* 通用 */
+.empty-state {
+  color: var(--muted);
+  text-align: center;
+  padding: 40px 20px;
+}
+.loading { color: var(--muted); padding: 20px; text-align: center; }
+.error-msg {
+  background: #ffebee;
+  color: var(--red);
+  padding: 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.stale-badge {
+  background: var(--yellow);
+  color: #333;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>编辑校次事实核查助手</h1>
+  <div class="config">
+    <input type="text" id="cfg-url" placeholder="后端地址（如 https://xxx.workers.dev）">
+    <input type="text" id="cfg-key" placeholder="Worker Key 或 sk-...">
+    <button id="btn-save-cfg">保存配置</button>
+    <button id="btn-test">测试连通</button>
+  </div>
+</div>
+
+<div class="main">
+  <!-- 左栏：待查文本 -->
+  <div class="panel">
+    <h2>待查文本</h2>
+    <div class="text-input">
+      <textarea id="input-text" placeholder="粘贴需要核查的稿件句子、词条或古文片段..."></textarea>
+      <div class="mode-switch">
+        <label><input type="radio" name="mode" value="single" checked> 单句查证</label>
+        <label><input type="radio" name="mode" value="entry"> 词条查询</label>
+        <label><input type="radio" name="mode" value="batch"> 批量查证</label>
+        <label><input type="radio" name="mode" value="ancient"> 古文查证</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-check">查证</button>
+        <button class="btn-secondary" id="btn-clear">清空</button>
+      </div>
+    </div>
+    <div class="kb-entry-list" id="kb-entries">
+      <h3>知识库词条</h3>
+      <div class="empty-state">暂无词条</div>
+    </div>
+  </div>
+
+  <!-- 中栏：检索结果 -->
+  <div class="panel">
+    <h2>检索结果</h2>
+    <div class="source-tabs">
+      <button class="active" data-source="official">官方</button>
+      <button data-source="ancient">古籍</button>
+      <button data-source="all">全网</button>
+    </div>
+    <div id="search-results">
+      <div class="empty-state">查证后在此显示结果</div>
+    </div>
+  </div>
+
+  <!-- 右栏：核查报告 -->
+  <div class="panel">
+    <h2>核查报告</h2>
+    <div id="report-area">
+      <div class="empty-state">查证后在此显示评级与纠错建议</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // 状态
+  var state = {
+    baseUrl: localStorage.getItem('fc_base_url') || '',
+    workerKey: localStorage.getItem('fc_worker_key') || '',
+    mode: 'single',
+    busy: false,
+    kbEntries: []
+  };
+
+  // DOM
+  var $ = function(id) { return document.getElementById(id); };
+
+  // 初始化配置
+  $('cfg-url').value = state.baseUrl;
+  $('cfg-key').value = state.workerKey;
+
+  // 保存配置
+  $('btn-save-cfg').onclick = function() {
+    state.baseUrl = $('cfg-url').value.trim().replace(/\/$/, '');
+    state.workerKey = $('cfg-key').value.trim();
+    localStorage.setItem('fc_base_url', state.baseUrl);
+    localStorage.setItem('fc_worker_key', state.workerKey);
+    alert('配置已保存');
+  };
+
+  // 测试连通
+  $('btn-test').onclick = async function() {
+    if (!state.baseUrl) { alert('请先填后端地址'); return; }
+    $('btn-test').textContent = '测试中...';
+    try {
+      var resp = await fetch(state.baseUrl + '/api/health');
+      var j = await resp.json();
+      if (j.ok) {
+        alert('连通成功\n模型：' + j.data.llm + '\nKV：' + JSON.stringify(j.data.kv));
+      } else {
+        alert('连通失败：' + JSON.stringify(j));
+      }
+    } catch (e) {
+      alert('连接错误：' + e.message);
+    }
+    $('btn-test').textContent = '测试连通';
+  };
+
+  // 模式切换
+  document.querySelectorAll('input[name="mode"]').forEach(function(r) {
+    r.onchange = function() { state.mode = r.value; };
+  });
+
+  // 源切换
+  document.querySelectorAll('.source-tabs button').forEach(function(b) {
+    b.onclick = function() {
+      document.querySelectorAll('.source-tabs button').forEach(function(x) { x.classList.remove('active'); });
+      b.classList.add('active');
+    };
+  });
+
+  // 统一 fetch 封装
+  async function apiFetch(path, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    opts.headers['Content-Type'] = 'application/json';
+    if (state.workerKey) {
+      opts.headers['X-Worker-Key'] = state.workerKey;
+    }
+    var resp = await fetch(state.baseUrl + path, opts);
+    var j = await resp.json();
+    if (!j.ok) {
+      throw new Error(j.error?.message || '未知错误');
+    }
+    return j.data;
+  }
+
+  // 渲染检索结果
+  function renderResults(results) {
+    var box = $('search-results');
+    if (!results || results.length === 0) {
+      box.innerHTML = '<div class="empty-state">无结果</div>';
+      return;
+    }
+    box.innerHTML = results.map(function(r) {
+      var tagHtml = r.official_tag
+        ? '<span class="tag-official">★官方</span>'
+        : '<span class="tag-unofficial">待甄别</span>';
+      var title = r.title || '(无标题)';
+      var url = r.url || '#';
+      var snippet = (r.snippet || r.description || '').slice(0, 200);
+      var score = r.official_score != null ? '官方性：' + r.official_score : '';
+      return '<div class="result-item">' +
+        '<div class="title">' + tagHtml +
+        '<a href="' + escapeHtml(url) + '" target="_blank">' + escapeHtml(title) + ' ↗</a></div>' +
+        '<div class="snippet">' + escapeHtml(snippet) + '</div>' +
+        (score ? '<div class="score">' + score + '</div>' : '') +
+        '</div>';
+    }).join('');
+  }
+
+  // 渲染核查报告
+  function renderReport(data) {
+    var box = $('report-area');
+    if (!data) {
+      box.innerHTML = '<div class="empty-state">无报告</div>';
+      return;
+    }
+
+    // 词条卡
+    if (data.card) {
+      var card = data.card;
+      var factsHtml = (card.facts || []).map(function(f) {
+        var src = f.source || {};
+        var srcTag = src.official_tag ? '<span class="tag-official">★官方</span>' : '';
+        var staleBadge = isStale(f.verified_at) ? '<span class="stale-badge">待复核</span>' : '';
+        return '<div class="kb-fact">' +
+          '<span class="label">' + escapeHtml(f.label || '') + ':</span> ' +
+          '<span class="value">' + escapeHtml(f.value || '') + '</span> ' + staleBadge + srcTag +
+          '<div class="source">来源：' + escapeHtml(src.name || '') +
+          (src.url ? ' <a href="' + escapeHtml(src.url) + '" target="_blank" class="ref-link">查看 ↗</a>' : '') +
+          '</div></div>';
+      }).join('');
+      var refsHtml = (card.references || []).map(function(r) {
+        return '<a href="' + escapeHtml(r.url || '#') + '" target="_blank" class="ref-link">[' +
+          escapeHtml(r.name || '') + '] ↗</a>';
+      }).join('');
+      box.innerHTML = '<div class="kb-card">' +
+        '<h3>' + escapeHtml(card.title || '') + '</h3>' +
+        '<div style="color:#666;font-size:12px;margin-bottom:8px;">分类：' + escapeHtml(card.category || '') +
+        ' | 更新：' + escapeHtml(card.updated_at || '') + '</div>' +
+        factsHtml + refsHtml + '</div>';
+      return;
+    }
+
+    // 核查报告
+    var rating = data.rating || 'unknown';
+    var ratingClass = rating === 'high' ? 'rating-high' :
+                      rating === 'medium' ? 'rating-medium' : 'rating-low';
+    var html = '<div class="report-section">' +
+      '<span class="rating-badge ' + ratingClass + '">真实度：' + rating + '</span></div>';
+
+    if (data.ratings && data.ratings.length > 0) {
+      html += data.ratings.map(function(r) {
+        var c = r.rating === 'high' ? 'rating-high' :
+                r.rating === 'medium' ? 'rating-medium' : 'rating-low';
+        var html2 = '<div class="report-section">' +
+          '<span class="rating-badge ' + c + '">' + r.rating + '</span>' +
+          '<div style="margin-top:8px;"><strong>断言：</strong>' + escapeHtml(r.claim?.claim || '') + '</div>' +
+          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '') + '</div>';
+        if (r.correction) {
+          html2 += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
+        }
+        if (r.sources) {
+          html2 += r.sources.map(function(s) {
+            return '<a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
+              escapeHtml(s.title || '') + '] ↗</a>';
+          }).join('');
+        }
+        html2 += '</div>';
+        return html2;
+      }).join('');
+    }
+
+    // 古文结果
+    if (data.matches) {
+      html = '<div class="report-section"><strong>断句：</strong>' + escapeHtml(data.segment || '') + '</div>';
+      if (data.suspected_err && data.suspected_err.length > 0) {
+        html += '<div class="correction-box"><strong>疑似讹字：</strong>' +
+          escapeHtml(JSON.stringify(data.suspected_err)) + '</div>';
+      }
+      html += data.matches.map(function(m) {
+        var conf = m.confidence != null ? (m.confidence * 100).toFixed(0) + '%' : '?';
+        return '<div class="report-section">' +
+          '<div><strong>' + escapeHtml(m.book || '') + ' · ' + escapeHtml(m.chapter || '') + '</strong></div>' +
+          '<div style="margin-top:4px;">' + escapeHtml(m.text || '') + '</div>' +
+          '<div class="score">相似度：' + conf + '</div>' +
+          (m.url ? '<a href="' + escapeHtml(m.url) + '" target="_blank" class="ref-link">查看原文 ↗</a>' : '') +
+          '</div>';
+      }).join('');
+      if (data.all_low_confidence) {
+        html += '<div class="correction-box">未找到精确匹配，疑似讹误/辑佚</div>';
+      }
+      if (data.math_info) {
+        html += '<div class="report-section"><strong>算书指纹：</strong>' +
+          escapeHtml(JSON.stringify(data.math_info)) + '</div>';
+      }
+    }
+
+    box.innerHTML = html || '<div class="empty-state">无报告数据</div>';
+  }
+
+  // 判断是否过期（180 天）
+  function isStale(dateStr) {
+    if (!dateStr) return false;
+    var d = new Date(dateStr);
+    return (Date.now() - d.getTime()) > 180 * 24 * 60 * 60 * 1000;
+  }
+
+  // HTML 转义
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // 查证按钮
+  $('btn-check').onclick = async function() {
+    var text = $('input-text').value.trim();
+    if (!text) { alert('请输入待查文本'); return; }
+    if (!state.baseUrl) { alert('请先配置后端地址'); return; }
+    if (state.busy) return;
+    state.busy = true;
+    $('btn-check').textContent = '查证中...';
+    $('btn-check').disabled = true;
+    $('search-results').innerHTML = '<div class="loading">检索中...</div>';
+    $('report-area').innerHTML = '<div class="loading">核查中...</div>';
+
+    try {
+      if (state.mode === 'entry') {
+        // 词条查询
+        var data = await apiFetch('/api/kb/query', {
+          method: 'POST',
+          body: JSON.stringify({ keyword: text })
+        });
+        if (data.hit) {
+          renderReport(data);
+          $('search-results').innerHTML = '<div class="empty-state">已命中知识库</div>';
+        } else {
+          // 回退到检索
+          var sr = await apiFetch('/api/search', {
+            method: 'POST',
+            body: JSON.stringify({ query: text, prefer_official: true })
+          });
+          renderResults(sr.results);
+          renderReport({ rating: 'unknown' });
+          $('report-area').innerHTML = '<div class="empty-state">未命中知识库，已为你检索官方源。' +
+            '<br><button class="btn-secondary" onclick="window._submitDraft()">提议入库</button></div>';
+        }
+      } else if (state.mode === 'ancient') {
+        // 古文查证
+        var ad = await apiFetch('/api/verify-ancient', {
+          method: 'POST',
+          body: JSON.stringify({ text: text, category: 'general' })
+        });
+        renderReport(ad);
+        renderResults([]);
+      } else if (state.mode === 'batch') {
+        // 批量查证
+        var lines = text.split('\n').filter(function(l) { return l.trim(); });
+        $('search-results').innerHTML = '<div class="loading">批量查证中（' + lines.length + '行）...</div>';
+        var results = [];
+        for (var i = 0; i < lines.length; i++) {
+          try {
+            var bd = await apiFetch('/api/check', {
+              method: 'POST',
+              body: JSON.stringify({ text: lines[i], mode: 'single' })
+            });
+            results.push({ line: lines[i], data: bd });
+          } catch (e) {
+            results.push({ line: lines[i], error: e.message });
+          }
+        }
+        renderBatchResults(results);
+      } else {
+        // 单句查证
+        var cd = await apiFetch('/api/check', {
+          method: 'POST',
+          body: JSON.stringify({ text: text, mode: 'single' })
+        });
+        var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
+        renderResults(allResults);
+        renderReport(cd);
+      }
+    } catch (e) {
+      $('report-area').innerHTML = '<div class="error-msg">错误：' + escapeHtml(e.message) + '</div>';
+    }
+    state.busy = false;
+    $('btn-check').textContent = '查证';
+    $('btn-check').disabled = false;
+  };
+
+  // 批量结果渲染
+  function renderBatchResults(results) {
+    var html = results.map(function(r, i) {
+      if (r.error) {
+        return '<div class="result-item"><div class="title">第' + (i+1) + '行</div>' +
+          '<div class="error-msg">' + escapeHtml(r.error) + '</div></div>';
+      }
+      var rating = r.data.rating || 'unknown';
+      var c = rating === 'high' ? 'rating-high' : rating === 'medium' ? 'rating-medium' : 'rating-low';
+      return '<div class="result-item"><div class="title">第' + (i+1) + '行 ' +
+        '<span class="rating-badge ' + c + '">' + rating + '</span></div>' +
+        '<div class="snippet">' + escapeHtml(r.line) + '</div></div>';
+    }).join('');
+    $('search-results').innerHTML = html;
+    $('report-area').innerHTML = '<div class="empty-state">批量结果见中栏</div>';
+  }
+
+  // 提议入库
+  window._submitDraft = async function() {
+    var text = $('input-text').value.trim();
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({
+          card: {
+            title: text,
+            aliases: [],
+            category: 'auto',
+            facts: [],
+            references: []
+          },
+          action: 'submit'
+        })
+      });
+      alert('已提议入库，待管理员审核：' + JSON.stringify(r));
+    } catch (e) {
+      alert('入库失败：' + e.message);
+    }
+  };
+
+  // 清空
+  $('btn-clear').onclick = function() {
+    $('input-text').value = '';
+    $('search-results').innerHTML = '<div class="empty-state">查证后在此显示结果</div>';
+    $('report-area').innerHTML = '<div class="empty-state">查证后在此显示评级与纠错建议</div>';
+  };
+
+  console.log('编辑校次事实核查助手 已加载');
+})();
+</script>
+</body>
+</html>

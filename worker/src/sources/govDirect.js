@@ -25,7 +25,8 @@ const DOMAIN_NAMES = [
 
 function siteNameFromUrl(url) {
   try {
-    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '').replace(/^big5\./, '');
+    // 保留 www 前缀用于精确匹配（www.gov.cn=中国政府网）；仅去 big5 繁体镜像前缀
+    const host = new URL(url).hostname.toLowerCase().replace(/^big5\./, '');
     for (const d of DOMAIN_NAMES) {
       if (host === d.match || host.endsWith('.' + d.match)) return d.name;
     }

@@ -6,6 +6,7 @@ import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, searchCacheKey } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch } from '../sources/brave.js';
+import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { submitDraft } from '../utils/kbStore.js';
@@ -68,60 +69,106 @@ function detectIntent(text) {
   return 'assertion';
 }
 
+// 数据句单位：货币/百分比（经济）+ 度量衡（自然）
+const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
+const EN_UNIT = '(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km/h|mph|years?|yrs?|hectares?|percent|%)';
+const DATA_CN_RE = new RegExp('[^。；;\\n]*\\d[\\d.,，\\-－—~～]*\\s*' + CN_UNIT + '[^。；;\\n]*[。；;\\n]', 'g');
+const DATA_EN_RE = new RegExp('[^.\\n]*\\d[\\d.,\\-–—~]*\\s*(?:' + EN_UNIT + ')\\b[^.\\n]*[.\\n]', 'gi');
+
+// 指标关键词 → 属性名（经济类在前，命中即归类）
+const INDICATORS = [
+  ['国内生产总值', '国内生产总值'], ['生产总值', '国内生产总值'], ['GDP', '国内生产总值'], ['gdp', '国内生产总值'],
+  ['居民消费价格', '居民消费价格指数(CPI)'], ['CPI', '居民消费价格指数(CPI)'], ['cpi', '居民消费价格指数(CPI)'],
+  ['人均可支配收入', '人均可支配收入'], ['财政收入', '财政收入'], ['税收收入', '税收收入'],
+  ['粮食产量', '粮食产量'], ['总产量', '产量'], ['产量', '产量'],
+  ['城镇化率', '城镇化率'], ['失业率', '失业率'], ['出生率', '出生率'], ['人口', '人口'],
+  ['同比增长', '增长率'], ['比上年增长', '增长率'], ['增长', '增长率'], ['增速', '增长率'], ['增长率', '增长率'],
+  ['人均', '人均值'], ['收入', '收入'],
+  ['体重', '体重'], ['體重', '体重'], ['体长', '体长'], ['體長', '体长'], ['身高', '身高'],
+  ['寿命', '寿命'], ['壽命', '寿命'], ['海拔', '海拔'], ['面积', '面积'], ['面積', '面积'],
+  ['速度', '速度'], ['咬合力', '咬合力'], ['翼展', '翼展'], ['重量', '重量'],
+  // 英文指标词
+  ['weigh', '体重'], ['weight', '体重'], ['body mass', '体重'],
+  ['body length', '体长'], ['length', '体长'], ['long', '体长'],
+  ['lifespan', '寿命'], ['life span', '寿命'], ['years old', '寿命'], ['old', '寿命'],
+  ['speed', '速度'], ['km/h', '速度'],
+  ['elevation', '海拔'], ['altitude', '海拔'], ['above sea', '海拔'],
+  ['bite force', '咬合力'], ['wingspan', '翼展'],
+  ['population', '种群数量'], ['inhabitants', '种群数量'],
+];
+
+function classifyProp(sentence) {
+  for (const [kw, prop] of INDICATORS) {
+    if (sentence.includes(kw)) return prop;
+  }
+  return null;
+}
+
 /**
- * 把维基/英文维基结果中的数据句解析成百科卡片（属性→数值→来源）
+ * 把检索结果（维基 + 官方站）中的数据句解析成百科卡片（属性→数值→来源）
+ * 官方来源（gov-direct / ★官方）优先
  */
-function buildFactCard(results, entity) {
+function buildFactCard(results, entity, queryText = '') {
   const facts = [];
-  const DATA_LINE_RE = /【数据】([\s\S]*)/;
-  const EN_DATA_PREFIX = '【英文维基数据】';
-  const SYS_PROP = new Set(['海拔', '高度', '栖息', '分布', '活动', '面积', '现存']);
+  const list = Array.isArray(results) ? results : [];
 
-  for (const r of results) {
-    const snip = r.snippet || '';
-    // 中文维基数据句
-    const m = snip.match(DATA_LINE_RE);
-    if (m) {
-      const lines = m[1].split(/(?<=。)/g).map(s => s.trim()).filter(Boolean);
-      for (const line of lines) {
-        if (line.length < 8) continue;
-        // 从中文句子里抽属性词
-        const propM = line.match(/(体重|体长|身高|寿命|年龄|速度|面积|海拔|重量|翼展|跨度|直径|厚度|深度|宽度|长度|产量|人口|分布|栖息|现存|数量|咬合力|出生|逝世)/);
-        if (propM && line.match(/\d|公斤|千克|米|厘米|岁|年|公里|公顷|牛顿/)) {
-          facts.push({ property: propM[1], value: line, source: { name: r.title, url: r.url } });
-        }
+  // 官方结果排前
+  const sorted = [...list].sort((a, b) => {
+    const oa = a.source === 'gov-direct' || a.official_tag ? 0 : 1;
+    const ob = b.source === 'gov-direct' || b.official_tag ? 0 : 1;
+    return oa - ob;
+  });
+
+  // 查询中的年份（如 2025），优先保留含该年份的数据句
+  const yearM = String(queryText || '').match(/(19|20)\d{2}/);
+  const wantYear = yearM ? yearM[0] : '';
+
+  for (const r of sorted) {
+    const snip = (r.snippet || '').replace(/【[^】]*】/g, ' ');
+    const isEn = /^[\x00-\x7F\s.,;:%()\-–—+]*$/.test(snip.slice(0, 60)) && /[a-zA-Z]/.test(snip.slice(0, 60));
+    const srcName = r.site_name || r.title || '来源';
+    const source = { name: srcName, url: r.url, official: r.source === 'gov-direct' || !!r.official_tag };
+
+    // 切句并提取数据句
+    let sentences = [];
+    if (isEn) {
+      for (const para of snip.split(/\n+/)) {
+        for (const s of para.split(/(?<=\.)\s+(?=[A-Z(])/)) sentences.push(s.trim());
       }
+    } else {
+      sentences = snip.split(/(?<=[。；;])/g).map(s => s.trim()).filter(Boolean);
     }
-    // 英文维基数据句（直接保留原始英文，已含完整数据）
-    const m2 = snip.match(new RegExp(EN_DATA_PREFIX + '([\\s\\S]*)'));
-    if (m2) {
-      const lines = m2[1].split(/(?<=\.)\s+/g).map(s => s.trim()).filter(Boolean);
-      for (const line of lines) {
-        if (line.length < 15) continue;
-        // 粗略属性分类
-        let prop = '其他数据';
-        if (/weigh|weight|kg|kilogram/i.test(line)) prop = '体重';
-        else if (/long|length|meter|cm/i.test(line)) prop = '体长';
-        else if (/old|age|year/i.test(line)) prop = '寿命';
-        else if (/speed|km\/h|mph/i.test(line)) prop = '速度';
-        else if (/elevation|altitude|above sea|m\s/i.test(line)) prop = '海拔';
-        else if (/force|newton|bite/i.test(line)) prop = '咬合力';
-        else if (/population|inhabitant|million|billion/i.test(line)) prop = '数量';
-        facts.push({ property: prop, value: line, source: { name: r.title, url: r.url } });
-      }
+
+    for (let s0 of sentences) {
+      const s = s0.replace(/\s+/g, ' ').trim();
+      if (s.length < 8 || s.length > 160) continue;
+      // 跳过网页页脚/备案/导航噪音
+      if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图/.test(s)) continue;
+      const hasData = isEn ? DATA_EN_RE.test(s) : DATA_CN_RE.test(s);
+      if (isEn) DATA_EN_RE.lastIndex = 0; else DATA_CN_RE.lastIndex = 0;
+      if (!hasData) continue;
+      const prop = classifyProp(s) || '相关数据';
+      // 含目标年份的句子加权排前
+      const yearHit = wantYear && s.includes(wantYear);
+      facts.push({ property: prop, value: s, source, yearHit, official: source.official });
     }
   }
 
-  // 去重：同一属性保留最完整的一条
-  const seen = new Map();
+  // 排序：官方优先 → 含目标年份优先
+  facts.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
+
+  // 去重：同属性+相似开头只留一条（优先官方/含年份）
+  const seen = new Set();
+  const out = [];
   for (const f of facts) {
-    const key = f.property + '|' + f.value.slice(0, 30);
-    if (!seen.has(key)) seen.set(key, f);
+    const key = f.property + '|' + f.value.replace(/\s/g, '').slice(0, 24);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(f);
+    if (out.length >= 12) break;
   }
-  return {
-    title: entity || text,
-    facts: [...seen.values()],
-  };
+
+  return { title: entity || queryText || '', facts: out };
 }
 
 /**
@@ -161,9 +208,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     searchResults = [];
   }
 
+  // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
+  if (intent === 'query') {
+    try {
+      const govRaw = await searchGovDirect(searchQuery);
+      const govAnnotated = annotateResults(govRaw, env);
+      // 官方结果排前合并
+      searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
+    } catch { /* 官方检索失败不影响维基结果 */ }
+  }
+
   // ---------- 分支 A：查询模式 → 百科卡片 + 直接解答 + 可信度 ----------
   if (intent === 'query') {
-    const factCard = buildFactCard(searchResults, entity || text.trim());
+    const factCard = buildFactCard(searchResults, entity || text.trim(), text);
 
     // 基于检索到的权威数据，让 LLM 生成一句话直接解答并评估可信度
     let answer = '';

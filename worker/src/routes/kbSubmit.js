@@ -2,7 +2,7 @@
 
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
-import { submitDraft, approveEntry, clearPending, listPending, listStale } from '../utils/kbStore.js';
+import { submitDraft, approveEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify } from '../utils/kbStore.js';
 import { runCheck } from './check.js';
 
 export async function handleKbSubmit(request, env) {
@@ -48,6 +48,55 @@ export async function handleKbSubmit(request, env) {
     return jsonResponse({ ok: true, data: result }, 200, request);
   }
 
+  // 驳回（不通过）待审词条
+  if (action === 'reject') {
+    const { slug, timestamp } = body;
+    if (timestamp && slug) {
+      await clearPending(env.FACT_KB, timestamp, slug);
+    } else if (slug) {
+      // 没有 timestamp 时，按前缀删除 pending 记录
+      const pending = await env.FACT_KB.list({ prefix: 'kb:pending:', limit: 50 });
+      for (const k of (pending.keys || pending || [])) {
+        if (k.name.endsWith(`:${slug}`)) {
+          await env.FACT_KB.delete(k.name);
+        }
+      }
+    }
+    return jsonResponse({ ok: true, data: { rejected: slug } }, 200, request);
+  }
+
+  // 列出已入库词条
+  if (action === 'list_verified') {
+    const { limit, cursor } = body;
+    const data = await listVerified(env.FACT_KB, limit || 100, cursor || null);
+    return jsonResponse({ ok: true, data }, 200, request);
+  }
+
+  // 搜索知识库
+  if (action === 'search') {
+    const { keyword } = body;
+    if (!keyword) return errorJson('keyword 字段必填', 400, 'BAD_REQUEST', request);
+    const items = await searchEntries(env.FACT_KB, keyword);
+    return jsonResponse({ ok: true, data: { items } }, 200, request);
+  }
+
+  // 查看词条详情
+  if (action === 'get') {
+    const { slug } = body;
+    if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
+    const card = await getEntry(env.FACT_KB, slug);
+    if (!card) return errorJson('词条不存在', 404, 'NOT_FOUND', request);
+    return jsonResponse({ ok: true, data: { card } }, 200, request);
+  }
+
+  // 删除词条
+  if (action === 'delete') {
+    const { slug } = body;
+    if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
+    const result = await deleteEntry(env.FACT_KB, slug);
+    return jsonResponse({ ok: true, data: result }, 200, request);
+  }
+
   // 提议入库
   let card = body.card;
   const text = (body.text || '').trim();
@@ -74,8 +123,18 @@ export async function handleKbSubmit(request, env) {
   if (!card.title) {
     return errorJson('card.title 字段必填', 400, 'BAD_REQUEST', request);
   }
+
+  // 自动审核门槛：满足条件直接转正，不满足进 pending 等人审
+  const audit = autoAudit(card);
+  if (audit.pass) {
+    // 自动转正
+    const slug = card.id || slugify(card.title);
+    const result = await approveEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
+    return jsonResponse({ ok: true, data: { ...result, card, auto_audited: true, audit_reasons: [] } }, 200, request);
+  }
+  // 不满足门槛 → 进待审队列
   const result = await submitDraft(env.FACT_KB, card);
-  return jsonResponse({ ok: true, data: { ...result, card } }, 200, request);
+  return jsonResponse({ ok: true, data: { ...result, card, auto_audited: false, audit_reasons: audit.reasons } }, 200, request);
 }
 
 // GET /api/kb/entry/:key - 词条详情

@@ -161,12 +161,50 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     searchResults = [];
   }
 
-  // ---------- 分支 A：查询模式 → 百科卡片 ----------
+  // ---------- 分支 A：查询模式 → 百科卡片 + 直接解答 + 可信度 ----------
   if (intent === 'query') {
     const factCard = buildFactCard(searchResults, entity || text.trim());
+
+    // 基于检索到的权威数据，让 LLM 生成一句话直接解答并评估可信度
+    let answer = '';
+    let confidence = 'low';
+    let confidenceReason = '';
+    if (factCard.facts.length > 0) {
+      try {
+        const dataText = factCard.facts
+          .map(f => `[${f.property}] ${f.value}（来源：${f.source.name}）`)
+          .join('\n');
+        const llmResp = await callLLMJson({
+          messages: [
+            {
+              role: 'system',
+              content: '你是资料核查助手。根据检索到的权威数据，直接回答用户的问题，并评估数据可信度。' +
+                '可信度判定：多个独立权威来源数据一致、或有明确数值出处→"高"；仅单一来源或数据为约数/范围→"中"；数据缺失或相互矛盾→"低"。' +
+                '只输出 JSON：{"answer":"针对用户问题的一句话直接解答，必须含具体数值和单位","confidence":"高或中或低","reason":"一句话说明可信度依据（来源数量、是否一致）"}，不要解释。',
+            },
+            {
+              role: 'user',
+              content: `用户查询：${text}\n\n检索到的权威数据：\n${dataText}\n\n请输出 JSON。`,
+            },
+          ],
+          apiKey,
+          temperature: 0.2,
+          maxTokens: 600,
+        });
+        if (llmResp && !Array.isArray(llmResp) && llmResp.answer) {
+          answer = String(llmResp.answer);
+          confidence = ['高', '中', '低'].includes(llmResp.confidence) ? llmResp.confidence : '中';
+          confidenceReason = String(llmResp.reason || '');
+        }
+      } catch { /* LLM 失败则只展示数据卡片 */ }
+    }
+
     return {
       intent: 'query',
       factCard,
+      answer,
+      confidence,
+      confidenceReason,
       searches: [{ query: searchQuery, results: searchResults }],
       rating: 'info',
       claims: [],

@@ -406,8 +406,9 @@ body {
       var url = r.url || '#';
       var snippet = (r.snippet || r.description || '').slice(0, 200);
       var score = r.official_score != null ? '官方性：' + r.official_score : '';
+      var siteHtml = r.site_name ? '<span style="color:#0a7d32;font-size:12px;font-weight:600;margin-right:6px;">[' + escapeHtml(r.site_name) + ']</span>' : '';
       return '<div class="result-item">' +
-        '<div class="title">' + tagHtml +
+        '<div class="title">' + tagHtml + siteHtml +
         '<a href="' + escapeHtml(url) + '" target="_blank">' + escapeHtml(title) + ' ↗</a></div>' +
         '<div class="snippet">' + escapeHtml(snippet) + '</div>' +
         (score ? '<div class="score">' + score + '</div>' : '') +
@@ -423,14 +424,25 @@ body {
       return;
     }
 
-    // 查询模式 → 百科卡片（属性: 数值 + 来源链接）
+    // 查询模式 → 百科卡片（直接解答 + 可信度 + 属性数值 + 来源链接）
     if (data.intent === 'query' && data.factCard) {
       var fc = data.factCard;
       var fcHtml = '';
+      // 可信度徽章
+      var conf = data.confidence || '低';
+      var confClass = conf === '高' ? 'rating-high' : (conf === '中' ? 'rating-medium' : 'rating-low');
+      // 直接解答区
+      if (data.answer) {
+        fcHtml += '<div class="report-section" style="background:#f0f7ff;border:1px solid #cfe3ff;border-radius:8px;padding:14px;margin-bottom:14px;">' +
+          '<div style="margin-bottom:8px;"><span class="rating-badge ' + confClass + '">可信度：' + escapeHtml(conf) + '</span></div>' +
+          '<div style="font-size:15px;line-height:1.7;color:#1a1a1a;"><strong>直接解答：</strong>' + escapeHtml(data.answer) + '</div>' +
+          (data.confidenceReason ? '<div style="font-size:12px;color:#888;margin-top:8px;">依据：' + escapeHtml(data.confidenceReason) + '</div>' : '') +
+          '</div>';
+      }
       if (!fc.facts || fc.facts.length === 0) {
-        fcHtml = '<div class="empty-state">未从权威数据源提取到结构化数据，请查看检索结果。</div>';
+        fcHtml += '<div class="empty-state">未从权威数据源提取到结构化数据，请查看检索结果。</div>';
       } else {
-        fcHtml = '<div class="kb-card"><h3>' + escapeHtml(fc.title || '') +
+        fcHtml += '<div class="kb-card"><h3>' + escapeHtml(fc.title || '') +
           '</h3><div style="color:#666;font-size:12px;margin-bottom:8px;">资料来源：维基百科（中英文）</div>';
         // 按属性分组，同一属性合并中英文数据
         var groups = {};
@@ -600,14 +612,8 @@ body {
                   method: 'POST',
                   body: JSON.stringify({ query: text, prefer_official: true })
                 });
-                // 给 gov-direct 来源加上标注
-                entryResults = (sr.results || []).map(function(r) {
-                  if (r.source === 'gov-direct') {
-                    r.snippet = '[官方站点搜索入口·点击跳转官网自行搜索] ' + (r.snippet || '');
-                    r.official_tag = false;
-                  }
-                  return r;
-                });
+                // 官方站结果由后端探测真实内容（有结果才返回），★官方标签以后端为准
+                entryResults = sr.results || [];
               } catch (e) { entryResults = []; }
             })(),
             (async function() {

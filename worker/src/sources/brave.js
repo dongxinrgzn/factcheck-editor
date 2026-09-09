@@ -272,6 +272,53 @@ async function ddgSearch(query, topK = 5) {
   }
 }
 
+// ---------- DuckDuckGo 站内探测（site:域名，用于判断官方站是否真有相关内容） ----------
+/**
+ * 在指定域名内用 DDG 检索，仅返回 URL 确实属于该域名的结果
+ * @returns {Promise<Array<{title,url,snippet}>>} 无结果时返回空数组
+ */
+export async function ddgSiteSearch(domain, query, topK = 3) {
+  try {
+    const q = `site:${domain} ${query}`;
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+    });
+    clearTimeout(t);
+    if (!resp.ok) return [];
+    const html = await resp.text();
+
+    const linkRe = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snipRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    const links = [];
+    let m;
+    while ((m = linkRe.exec(html)) !== null) {
+      let href = m[1];
+      const uddg = href.match(/[?&]uddg=([^&]+)/);
+      if (uddg) { try { href = decodeURIComponent(uddg[1]); } catch { /* keep */ } }
+      links.push({ url: href, title: stripHtml(m[2]) });
+    }
+    const snippets = [];
+    while ((m = snipRe.exec(html)) !== null) snippets.push(stripHtml(m[1]));
+
+    const out = [];
+    for (let i = 0; i < links.length; i++) {
+      // 仅保留 URL 确实属于该官方域名的结果
+      let host = '';
+      try { host = new URL(links[i].url).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
+      if (host !== domain && !host.endsWith('.' + domain)) continue;
+      out.push({ title: links[i].title, url: links[i].url, snippet: snippets[i] || '' });
+      if (out.length >= topK) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // ---------- SearXNG（末选） ----------
 async function searxSearch(query, topK = 5) {
   for (const instance of SEARX_INSTANCES) {

@@ -49,12 +49,13 @@ export async function handleSearch(request, env) {
     const whitelist = env.OFFICIAL_WHITELIST
       ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
       : ['gov.cn', 'org.cn'];
-    const govResults = await searchGovDirect(query, { topK: 3 });
+    const govResults = await searchGovDirect(query);
     try {
       const searxResults = await braveSearch({
         query, preferOfficial: true, topK: top_k, whitelist,
       });
-      results = [...searxResults, ...govResults];
+      // 官方真实结果优先排前，维基/其他来源其后
+      results = [...govResults, ...searxResults];
     } catch {
       results = govResults;
     }

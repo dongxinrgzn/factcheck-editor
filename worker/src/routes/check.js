@@ -13,6 +13,10 @@ import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
+// 属性维度词：断言中出现这些词时，检索词带上维度（如"大熊猫 体重"），
+// 并作为 hint 传给维基深度抽取，定向定位正文数据句
+const ATTR_RE = /(体重|體重|身高|体长|體長|身长|身長|寿命|壽命|年龄|年齡|速度|面积|面積|人口|产量|產量|距离|距離|海拔|重量|翼展|跨度|直径|直徑|厚度|深度|宽度|寬度|长度|長度|出生|生於|生于|卒於|卒于|逝世|去世)/;
+
 export async function handleCheck(request, env) {
   let body;
   try {
@@ -72,14 +76,18 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
 
   const searchResults = await Promise.all(
     claims.slice(0, 5).map(async (c) => {
-      // 用实体名检索（命中主词条），无实体时退回整句
-      const searchQuery = (c.entity && c.entity.trim()) ? c.entity.trim() : c.claim;
+      // 提取属性维度词（体重/体长/出生…），检索词带维度以命中含数据的段落
+      const attrM = (c.claim || '').match(ATTR_RE);
+      const hint = attrM ? attrM[1] : '';
+      // 用实体名检索（命中主词条），带属性维度；无实体时退回整句
+      const entity = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
+      const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : c.claim;
       const cacheK = searchCacheKey(searchQuery);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
       if (cached) return { claim: c, results: cached, cached: true };
 
       try {
-        const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist });
+        const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint });
         const annotated = annotateResults(raw, env);
         await cacheSet(env.FACT_CACHE, cacheK, annotated);
         return { claim: c, results: annotated, cached: false };

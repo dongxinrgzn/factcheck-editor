@@ -28,7 +28,154 @@ async function wikiExtract(lang, title) {
   } catch { return ''; }
 }
 
-async function wikiSearch(query, topK = 5) {
+// 强度量单位（噪音小，出现即是数据句）：公斤/千克/吨/米/厘米/平方千米/摄氏度/升/磅…
+const STRONG_UNIT = '(?:公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|英尺|英寸|英哩|英里|磅|平方公里|平方米|平方公尺|公顷|公頃|升|毫升|摄氏度|攝氏度|华氏度|萬人|万人|億人|亿人|萬隻|万只|米/秒|公里/小时|km|kg|cm|mm|km²|m²|米)';
+// 弱单位（年/岁等，单独出现可能是年份噪音，仅在含 hint 时采用）
+const WEAK_UNIT = '(?:岁|歲|年|載|载)';
+// 数字部分：支持范围写法 70-125 / 70～125 / 70至125 / 1.2、1.8
+const NUM_PART = '[\\d.,，\\-－—~～至到]';
+const CN_NUM = '[一二三四五六七八九十百千萬万零兩两]';
+const DATA_STRONG_RE = new RegExp('[^。\\n]*(?:\\d' + NUM_PART + '*\\s*' + STRONG_UNIT + '|' + CN_NUM + '[' + CN_NUM.slice(1, -1) + '0-9.,，\\-－—~～至到]*\\s*' + STRONG_UNIT + ')[^。\\n]*[。\\n]', 'g');
+const DATA_WEAK_RE = new RegExp('[^。\\n]*(?:\\d' + NUM_PART + '*\\s*' + WEAK_UNIT + '|' + CN_NUM + '[' + CN_NUM.slice(1, -1) + '0-9.,，\\-－—~～至到]*\\s*' + WEAK_UNIT + ')[^。\\n]*[。\\n]', 'g');
+
+// hint 属性词简繁对照（维基中文正文多为繁体）
+const HINT_VARIANTS = {
+  '体重': ['体重', '體重'], '体长': ['体长', '體長'], '身高': ['身高'],
+  '寿命': ['寿命', '壽命'], '年龄': ['年龄', '年齡'], '速度': ['速度'],
+  '面积': ['面积', '面積'], '人口': ['人口'], '产量': ['产量', '產量'],
+  '距离': ['距离', '距離'], '海拔': ['海拔'], '重量': ['重量'],
+  '身长': ['身長', '身长'], '翼展': ['翼展'],
+  '出生': ['出生', '生於', '生于', '誕生'], '逝世': ['逝世', '去世', '卒於', '卒于', '歿', '死於'],
+  '长度': ['长度', '長度'], '宽度': ['宽度', '寬度'], '直径': ['直径', '直徑'],
+};
+function hintMatch(sentence, hint) {
+  if (!hint) return false;
+  const variants = HINT_VARIANTS[hint] || [hint];
+  return variants.some(v => sentence.includes(v));
+}
+
+// 深度抽取：导言 + 正文中含具体数据的句子（体重/体长/生卒年等不在导言里的事实）
+async function wikiExtractDeep(lang, title, hint = '') {
+  const intro = await wikiExtract(lang, title);
+  try {
+    // 拿全文纯文本（特征/数据章节可能在导言 1.6 万字之后），再正则提取数据句
+    const url = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&titles=${encodeURIComponent(title)}&format=json&formatversion=2`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    const resp = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'FactCheckEditor/1.0' } });
+    clearTimeout(t);
+    if (!resp.ok) return intro;
+    const j = await resp.json();
+    const full = j?.query?.pages?.[0]?.extract || '';
+    if (!full) return intro;
+
+    // 提取含数字+单位的数据句；若有 hint（如"体重"），优先含 hint 的句子
+    const strong = [];
+    const weak = [];
+    let m;
+    DATA_STRONG_RE.lastIndex = 0;
+    while ((m = DATA_STRONG_RE.exec(full)) !== null) {
+      const s = m[0].trim();
+      if (s.length < 8 || s.length > 120) continue;
+      if (hint && hintMatch(s, hint)) strong.unshift(s); // 含 hint 的优先排前
+      else strong.push(s);
+      if (strong.length >= 6) break;
+    }
+    if (hint && strong.filter(s => hintMatch(s, hint)).length === 0) {
+      // hint 词没命中强度量句，再用弱单位（年/岁）找含 hint 的句子
+      DATA_WEAK_RE.lastIndex = 0;
+      while ((m = DATA_WEAK_RE.exec(full)) !== null) {
+        const s = m[0].trim();
+        if (s.length >= 8 && s.length <= 120 && hintMatch(s, hint)) weak.push(s);
+        if (weak.length >= 2) break;
+      }
+    }
+    const picked = [...weak, ...strong].slice(0, 5);
+    if (picked.length === 0) return intro;
+    return intro + '\n【数据】' + picked.join('');
+  } catch { return intro; }
+}
+
+// ---------- 英文维基补充（体重/体长等数据常只在 infobox 或英文正文） ----------
+// 中文 hint → 英文关键词
+const HINT_EN = {
+  '体重': ['weigh', 'weight', 'kg', 'kilogram', 'mass'],
+  '体长': ['length', 'long', 'measure', 'cm', 'm '],
+  '身长': ['length', 'long', 'measure'],
+  '身高': ['height', 'tall', 'shoulder'],
+  '寿命': ['lifespan', 'live', 'life span', 'years'],
+  '年龄': ['age', 'years old', 'born'],
+  '速度': ['speed', 'km/h', 'mph', 'fast'],
+  '面积': ['area', 'km2', 'square', 'hectare'],
+  '人口': ['population', 'inhabitant'],
+  '产量': ['production', 'produce', 'output', 'yield'],
+  '距离': ['distance', 'km', 'miles', 'far'],
+  '海拔': ['elevation', 'altitude', 'above sea'],
+  '重量': ['weigh', 'weight', 'kg', 'ton'],
+  '翼展': ['wingspan', 'wing span'],
+  '出生': ['born', 'birth'],
+  '逝世': ['died', 'death', 'dies'],
+  '长度': ['length', 'long', 'km', 'miles'],
+  '宽度': ['width', 'wide'],
+  '直径': ['diameter'],
+};
+
+async function wikiEnSupplement(zhTitle, hint) {
+  try {
+    // 1. 中文词条 → 英文词条名（langlinks）
+    const llUrl = `https://zh.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(zhTitle)}&prop=langlinks&lllang=en&format=json&formatversion=2`;
+    const ctrl1 = new AbortController();
+    const t1 = setTimeout(() => ctrl1.abort(), 7000);
+    const llResp = await fetch(llUrl, { signal: ctrl1.signal, headers: { 'User-Agent': 'FactCheckEditor/1.0' } });
+    clearTimeout(t1);
+    if (!llResp.ok) return null;
+    const llJ = await llResp.json();
+    const enTitle = llJ?.query?.pages?.[0]?.langlinks?.[0]?.title;
+    if (!enTitle) return null;
+
+    // 2. 英文词条全文
+    const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&titles=${encodeURIComponent(enTitle)}&format=json&formatversion=2`;
+    const ctrl2 = new AbortController();
+    const t2 = setTimeout(() => ctrl2.abort(), 11000);
+    const resp = await fetch(url, { signal: ctrl2.signal, headers: { 'User-Agent': 'FactCheckEditor/1.0' } });
+    clearTimeout(t2);
+    if (!resp.ok) return null;
+    const j = await resp.json();
+    const full = j?.query?.pages?.[0]?.extract || '';
+    if (!full) return null;
+    const pageid = j?.query?.pages?.[0]?.pageid;
+
+    // 3. 提取含数字+单位的英文句子，优先含 hint 英文词的
+    // 先按段落切，再按"句号+空格+大写"切句，避免小数点（1.9 m）被误切
+    const enHints = HINT_EN[hint] || [];
+    const unitRe = /\d[\d.,\-–—~]*\s*(?:kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|ft|feet|foot|inches?|tonnes?|tons?|km\/h|mph|years?|yrs?|hectares?)\b/i;
+    const hit = [];
+    const other = [];
+    for (const para of full.split(/\n+/)) {
+      const sentences = para.split(/(?<=\.)\s+(?=[A-Z(])/);
+      for (const s0 of sentences) {
+        const s = s0.replace(/\s+/g, ' ').trim();
+        if (s.length < 10 || s.length > 220) continue;
+        if (!unitRe.test(s)) continue;
+        const low = s.toLowerCase();
+        if (enHints.some(w => low.includes(w))) hit.push(s);
+        else other.push(s);
+        if (hit.length + other.length >= 10) break;
+      }
+      if (hit.length + other.length >= 10) break;
+    }
+    const picked = [...hit.slice(0, 4), ...other.slice(0, 2)];
+    if (picked.length === 0) return null;
+    return {
+      title: `${enTitle}（英文维基）`,
+      url: `https://en.wikipedia.org/?curid=${pageid}`,
+      snippet: '【英文维基数据】' + picked.join(' '),
+      source: 'wikipedia',
+    };
+  } catch { return null; }
+}
+
+async function wikiSearch(query, topK = 5, hint = '') {
   const out = [];
   for (const lang of ['zh', 'en']) {
     try {
@@ -41,9 +188,21 @@ async function wikiSearch(query, topK = 5) {
       const j = await resp.json();
       const hits = j?.query?.search || [];
       for (const h of hits) {
-        // 前 2 条取正文摘要（含生卒年等关键事实），其余用搜索摘要
-        let snippet = stripHtml(h.snippet);
-        if (out.length < 2) {
+        // 第 1 条主词条深度抽取（导言+正文数据句），第 2 条取导言，其余用搜索摘要
+        const searchSnip = stripHtml(h.snippet);
+        let snippet = searchSnip;
+        let deepHasHint = false;
+        if (out.length === 0) {
+          const ext = await wikiExtractDeep(lang, h.title, hint);
+          if (ext) {
+            snippet = ext;
+            deepHasHint = hint ? hintMatch(ext, hint) : true;
+            // 搜索命中片段（含 hint 词的正文局部）往往就是答案所在，若未被深度抽取覆盖则补上
+            if (hint && searchSnip && searchSnip.length >= 10 && !deepHasHint) {
+              snippet += '\n【相关片段】' + searchSnip;
+            }
+          }
+        } else if (out.length < 2) {
           const ext = await wikiExtract(lang, h.title);
           if (ext) snippet = ext;
         }
@@ -53,6 +212,12 @@ async function wikiSearch(query, topK = 5) {
           snippet,
           source: 'wikipedia',
         });
+
+        // 中文主词条有属性维度（体重/体长…）但中文正文没抓到对应数据句时，补英文维基
+        if (out.length === 1 && lang === 'zh' && hint && !deepHasHint) {
+          const en = await wikiEnSupplement(h.title, hint);
+          if (en) out.push(en);
+        }
       }
     } catch { /* 该语言失败则继续 */ }
     if (out.length >= topK) break;
@@ -131,14 +296,15 @@ async function searxSearch(query, topK = 5) {
 
 /**
  * 综合全网检索（多源兜底）
- * @param {Object} opts - { query, preferOfficial, topK, whitelist }
+ * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint }
+ *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
  */
 export async function braveSearch(opts = {}) {
-  const { query, topK = 5 } = opts;
+  const { query, topK = 5, hint = '' } = opts;
   if (!query) return [];
 
   // 维基 → DDG → SearXNG，任一源有结果即返回（合并去重）
-  const wiki = await wikiSearch(query, topK);
+  const wiki = await wikiSearch(query, topK, hint);
   if (wiki.length > 0) {
     const ddg = await ddgSearch(query, Math.max(0, topK - wiki.length));
     return dedupe([...wiki, ...ddg]).slice(0, topK);

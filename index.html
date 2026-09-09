@@ -277,6 +277,16 @@ body {
       </h3>
       <div id="pending-list"><div class="empty-state">点"刷新"加载待审词条</div></div>
     </div>
+    <div class="kb-entry-list">
+      <h3>知识库 · 已入库词条
+        <button class="btn-secondary" id="btn-refresh-kb" style="font-size:12px;padding:2px 8px;float:right;">刷新</button>
+      </h3>
+      <div style="display:flex;gap:4px;margin-bottom:8px;">
+        <input type="text" id="kb-search-input" placeholder="搜索词条标题..." style="flex:1;font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;">
+        <button class="btn-secondary" id="btn-kb-search" style="font-size:12px;padding:4px 8px;">搜索</button>
+      </div>
+      <div id="kb-list"><div class="empty-state">点"刷新"加载已入库词条</div></div>
+    </div>
   </div>
 
   <!-- 中栏：检索结果 -->
@@ -739,6 +749,93 @@ body {
   };
 
   $('btn-refresh-pending').onclick = loadPending;
+
+  // ---- 知识库管理：已入库词条查询/搜索/删除 ----
+  async function loadKbList(keyword) {
+    try {
+      var r;
+      if (keyword && keyword.trim()) {
+        r = await apiFetch('/api/kb/submit', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'search', keyword: keyword.trim() })
+        });
+      } else {
+        r = await apiFetch('/api/kb/submit', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'list_verified' })
+        });
+      }
+      var items = r.items || [];
+      var box = $('kb-list');
+      if (!items.length) {
+        box.innerHTML = '<div class="empty-state">' + (keyword ? '未搜到匹配词条' : '知识库暂无已入库词条') + '</div>';
+        return;
+      }
+      box.innerHTML = items.map(function(it) {
+        var st = it.status === 'auto_verified'
+          ? '<span style="font-size:10px;color:#888;background:#e8f5e9;padding:1px 4px;border-radius:3px;">自动审核</span>'
+          : '<span style="font-size:10px;color:#1565c0;background:#e3f2fd;padding:1px 4px;border-radius:3px;">人工审核</span>';
+        return '<div class="result-item" style="margin-bottom:6px;">' +
+          '<div class="title">' + escapeHtml(it.title || '(无标题)') +
+          ' ' + st +
+          ' <span style="font-size:11px;color:#888;">' + (it.fact_count || 0) + '条事实</span>' +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;" ' +
+          'onclick="window._viewKb(this,\'' + escapeHtml(it.id) + '\')">详情</button>' +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;color:#c62828;" ' +
+          'onclick="window._deleteKb(this,\'' + escapeHtml(it.id) + '\',\'' + escapeHtml(it.title || '') + '\')">删除</button>' +
+          '</div></div>';
+      }).join('');
+    } catch (e) {
+      $('kb-list').innerHTML = '<div class="error-msg">加载失败：' + escapeHtml(e.message) + '</div>';
+    }
+  }
+
+  window._viewKb = async function(btn, slug) {
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'get', slug: slug })
+      });
+      var card = r.card;
+      if (!card) { alert('词条不存在'); return; }
+      var facts = (card.facts || []).map(function(f) {
+        var src = f.source ? ' <a href="' + escapeHtml(f.source.url || '#') + '" target="_blank" style="color:#0a7d32;">' + escapeHtml(f.source.name || '来源') + '</a>' : '';
+        return '<div style="font-size:12px;margin:4px 0;">· <b>' + escapeHtml(f.label || '') + '</b> → ' +
+          escapeHtml((f.value || '').slice(0, 120)) +
+          ' <span style="font-size:10px;color:#888;">[' + (f.rating || '?') + ']</span>' +
+          src + '</div>';
+      }).join('');
+      alert(
+        '词条：' + (card.title || '') + '\n' +
+        '状态：' + (card.status || '') + '  版本：' + (card.version || 1) + '\n' +
+        '更新：' + (card.updated_at || '') + '\n' +
+        '事实条数：' + (card.facts || []).length + '\n\n' +
+        facts.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      );
+    } catch (e) { alert('查看失败：' + e.message); }
+  };
+
+  window._deleteKb = async function(btn, slug, title) {
+    if (!confirm('确认删除词条"' + title + '"？\n此操作不可恢复。')) return;
+    btn.disabled = true;
+    try {
+      await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'delete', slug: slug })
+      });
+      alert('已删除：' + title);
+      loadKbList($('kb-search-input').value);
+    } catch (e) {
+      alert('删除失败：' + e.message);
+      btn.disabled = false;
+    }
+  };
+
+  $('btn-refresh-kb').onclick = function() { loadKbList(''); };
+  $('btn-kb-search').onclick = function() { loadKbList($('kb-search-input').value); };
+  $('kb-search-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') loadKbList(this.value);
+  });
 
   // 清空
   $('btn-clear').onclick = function() {

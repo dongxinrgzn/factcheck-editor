@@ -7,7 +7,7 @@ export function buildRateTruthMessages(claim, evidence = []) {
   return [
     {
       role: 'system',
-      content: '基于下列检索证据，对每条断言评级。评级：high（官方源且数值一致）/ medium（源可信但有出入）/ low（查无实据或多源矛盾）。给出：依据（引用证据原文）、纠错建议（若 medium/low 必填）。输出 JSON，禁止编造未给出的证据。',
+      content: '基于下列检索证据，对每条断言评级。评级用中文：高（官方源且数值一致）/ 中（源可信但有出入）/ 低（查无实据或多源矛盾）。给出：依据（引用证据原文）、纠错建议（若 中/低 必填）。输出 JSON，禁止编造未给出的证据。',
     },
     {
       role: 'user',
@@ -16,6 +16,6 @@ export function buildRateTruthMessages(claim, evidence = []) {
   ];
 }
 
-export const RATE_TRUTH_SYSTEM = '基于下列检索证据，对每条断言评级。评级：high（官方源且数值一致）/ medium（源可信但有出入）/ low（查无实据或多源矛盾）。给出：依据（引用证据原文）、纠错建议（若 medium/low 必填）。输出 JSON，禁止编造未给出的证据。';
+export const RATE_TRUTH_SYSTEM = '基于下列检索证据，对每条断言评级。评级用中文：高（官方源且数值一致）/ 中（源可信但有出入）/ 低（查无实据或多源矛盾）。给出：依据（引用证据原文）、纠错建议（若 中/低 必填）。输出 JSON，禁止编造未给出的证据。';
 
 export const RATE_TRUTH_USER_TEMPLATE = '断言：{claim}\n\n证据：\n{evidence}\n\n输出：{"rating":"","evidence":"","correction":""}';

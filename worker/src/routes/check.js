@@ -5,7 +5,7 @@ import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, searchCacheKey } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
-import { braveSearch } from '../sources/brave.js';
+import { braveSearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
@@ -26,7 +26,7 @@ export async function handleCheck(request, env) {
     return errorJson('请求体格式错误', 400, 'BAD_REQUEST', request);
   }
 
-  const { text, context, mode = 'single' } = body;
+  const { text, context, mode = 'query' } = body;
   if (!text || typeof text !== 'string') {
     return errorJson('text 字段必填', 400, 'BAD_REQUEST', request);
   }
@@ -45,7 +45,7 @@ export async function handleCheck(request, env) {
   }
 
   try {
-    const data = await runCheck(text, context, env, apiKey, { autoDraft: true });
+    const data = await runCheck(text, context, env, apiKey, { autoDraft: true, mode });
     return jsonResponse({ ok: true, data }, 200, request);
   } catch (e) {
     return errorJson(e.message, 502, 'CHECK_ERROR', request);
@@ -53,21 +53,10 @@ export async function handleCheck(request, env) {
 }
 
 /**
- * 判断输入是"查询"（用户要百科数据）还是"断言"（用户说的一句话要判真伪）
- * 查询：短文本、无句号、有问号/疑问词、只有名词短语
- * 断言：完整句子（有主谓宾+标点）、有明确的陈述语气
+ * 评级中文映射
  */
-function detectIntent(text) {
-  const t = text.trim();
-  const hasPunct = /[。.!?！？]/.test(t);
-  const hasQuestion = /[？?多少几什么怎样如何是否是不是]/.test(t);
-  const isShort = t.length <= 20;
-  // 有问号必然是查询
-  if (hasQuestion) return 'query';
-  // 没有句号且很短 → 查询（如 "大熊猫 体重"、"鲁迅出生"）
-  if (!hasPunct && isShort && !/是|为|有|称|叫做|生于|卒于|在/.test(t)) return 'query';
-  return 'assertion';
-}
+const RATING_CN = { high: '高', medium: '中', low: '低', info: '查询结果', unknown: '未知' };
+function ratingCn(r) { return RATING_CN[r] || r; }
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
 const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
@@ -124,28 +113,36 @@ function buildFactCard(results, entity, queryText = '') {
   const wantYear = yearM ? yearM[0] : '';
 
   for (const r of sorted) {
-    const snip = (r.snippet || '').replace(/【[^】]*】/g, ' ');
+    const snip = (r.snippet || '')
+      .replace(/【[^】]*】/g, ' ')
+      .replace(/```[\s\S]*?```/g, ' ')       // 代码块
+      .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1') // **加粗**
+      .replace(/\*{1,3}/g, '')
+      .replace(/#{1,6}\s*/g, '')              // markdown 标题符
+      .replace(/`+/g, '')
+      .replace(/\|+/g, '，')                  // 表格分隔
+      .replace(/^[\s>·•\-–—*]+/gm, '');       // 行首符号
     const isEn = /^[\x00-\x7F\s.,;:%()\-–—+]*$/.test(snip.slice(0, 60)) && /[a-zA-Z]/.test(snip.slice(0, 60));
     const srcName = r.site_name || r.title || '来源';
     const source = { name: srcName, url: r.url, official: r.source === 'gov-direct' || !!r.official_tag };
 
-    // 切句并提取数据句
+    // 切句并提取数据句（中文按句号/分号/换行切分，换行也算边界，避免标题与正文连成一句）
     let sentences = [];
     if (isEn) {
       for (const para of snip.split(/\n+/)) {
         for (const s of para.split(/(?<=\.)\s+(?=[A-Z(])/)) sentences.push(s.trim());
       }
     } else {
-      sentences = snip.split(/(?<=[。；;])/g).map(s => s.trim()).filter(Boolean);
+      sentences = snip.split(/[。；;\n]+/g).map(s => s.trim()).filter(Boolean);
     }
 
     for (let s0 of sentences) {
       const s = s0.replace(/\s+/g, ' ').trim();
       if (s.length < 8 || s.length > 160) continue;
-      // 跳过网页页脚/备案/导航噪音
-      if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图/.test(s)) continue;
-      const hasData = isEn ? DATA_EN_RE.test(s) : DATA_CN_RE.test(s);
-      if (isEn) DATA_EN_RE.lastIndex = 0; else DATA_CN_RE.lastIndex = 0;
+      // 跳过网页页脚/备案/导航噪音，以及纯标题（无句读且过短的导航词）
+      if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图|首页|上一篇|下一篇|点击下载|字体大小|分享到/.test(s)) continue;
+      const hasData = isEn ? /\d[\d.,\-–—~]*\s*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
+        : new RegExp('\\d[\\d.,，\\-－—~～至到]*\\s*' + CN_UNIT).test(s);
       if (!hasData) continue;
       const prop = classifyProp(s) || '相关数据';
       // 含目标年份的句子加权排前
@@ -175,8 +172,8 @@ function buildFactCard(results, entity, queryText = '') {
  * 核查核心流程（供 /api/check 与 /api/kb/submit 复用）
  * @returns {Object} { claims, searches, ratings, rating, corrections, draftCard, factCard? }
  */
-export async function runCheck(text, context, env, apiKey, { autoDraft = false } = {}) {
-  const intent = detectIntent(text.trim());
+export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query' } = {}) {
+  const intent = mode === 'verify' ? 'assertion' : 'query';
 
   // 0. 两种模式共享的：检索（带属性维度 hint）
   // 先抽属性维度词和实体（如果有的话）
@@ -211,10 +208,14 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
   // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
   if (intent === 'query') {
     try {
-      const govRaw = await searchGovDirect(searchQuery);
+      const govRaw = await searchGovDirect(searchQuery, { apiKey: env.TAVILY_KEY });
       const govAnnotated = annotateResults(govRaw, env);
       // 官方结果排前合并
       searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
+      // 相关性过滤：剔除只在正文顺带提及实体的无关词条（如查"大熊猫"却召回"犬/郊狼/柳江人"）
+      // 用纯实体词（去掉体重/身高等属性词），避免"大熊猫 身高"这类不连续串误杀
+      const relEntity = entityTermOf(entity && entity.length >= 2 ? entity : text.trim());
+      searchResults = filterRelevant(searchResults, relEntity);
     } catch { /* 官方检索失败不影响维基结果 */ }
   }
 
@@ -256,6 +257,31 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
       } catch { /* LLM 失败则只展示数据卡片 */ }
     }
 
+    // 查询模式也生成 draftCard（供入库用）
+    let queryDraftCard = null;
+    if (factCard.facts.length > 0) {
+      queryDraftCard = {
+        title: entity || text.trim(),
+        aliases: [],
+        category: 'auto',
+        facts: factCard.facts.map(f => ({
+          label: f.property || text.trim(),
+          value: f.value || '',
+          rating: 'high',
+          source: f.source || {},
+          verified_at: new Date().toISOString().slice(0, 10),
+        })),
+        references: (searchResults || []).slice(0, 5).map(r => ({
+          name: r.title || r.site_name || '',
+          url: r.url || '',
+          official_tag: r.official_tag || false,
+        })),
+      };
+      if (autoDraft) {
+        try { await submitDraft(env.FACT_KB, queryDraftCard); } catch {}
+      }
+    }
+
     return {
       intent: 'query',
       factCard,
@@ -267,7 +293,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
       claims: [],
       corrections: [],
       ratings: [],
-      draftCard: null,
+      draftCard: queryDraftCard,
     };
   }
 
@@ -336,20 +362,23 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
   }
 
   const overall = ratings.every(r => r.rating === 'high')
-    ? 'high'
+    ? '高'
     : ratings.some(r => r.rating === 'low')
-    ? 'low'
-    : 'medium';
+    ? '低'
+    : '中';
+
+  // 评级转中文
+  const ratingsCn = ratings.map(r => ({ ...r, rating: ratingCn(r.rating) }));
 
   return {
-    intent: 'assertion',
+    intent: 'verify',
     claims,
     searches: checkSearches,
     rating: overall,
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
-    ratings,
+    ratings: ratingsCn,
     draftCard,
   };
 }

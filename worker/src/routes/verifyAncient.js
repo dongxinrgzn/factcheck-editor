@@ -9,6 +9,7 @@ import { searchZdic } from '../sources/zdic.js';
 import { searchGushiwen } from '../sources/gushiwen.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
+import { submitDraft } from '../utils/kbStore.js';
 
 export async function handleVerifyAncient(request, env) {
   let body;
@@ -130,6 +131,34 @@ export async function handleVerifyAncient(request, env) {
   // 7. 判断是否全部低置信
   const allLow = isAllLowConfidence(clustered);
 
+  // 生成古文 draftCard（供入库用）
+  let ancientDraftCard = null;
+  if (clustered.length > 0 && !allLow) {
+    const bestMatch = clustered[0];
+    ancientDraftCard = {
+      title: text.slice(0, 30),
+      aliases: [],
+      category: 'ancient',
+      facts: [{
+        label: text,
+        value: `出处：${bestMatch.book || ''}${bestMatch.chapter ? ' · ' + bestMatch.chapter : ''}`,
+        rating: bestMatch.confidence >= 0.8 ? '高' : '中',
+        source: {
+          name: bestMatch.book || bestMatch.edition || '',
+          url: bestMatch.url || '',
+          official_tag: bestMatch.edition === 'ctext',
+        },
+        verified_at: new Date().toISOString().slice(0, 10),
+      }],
+      references: clustered.slice(0, 5).map(m => ({
+        name: `${m.book || ''}${m.chapter ? ' · ' + m.chapter : ''}`,
+        url: m.url || '',
+        official_tag: m.edition === 'ctext',
+      })),
+    };
+    try { await submitDraft(env.FACT_KB, ancientDraftCard); } catch {}
+  }
+
   const result = {
     segment: segResult.segmented || text,
     anchors: segResult.anchors || [],
@@ -139,6 +168,7 @@ export async function handleVerifyAncient(request, env) {
     all_low_confidence: allLow,
     note: allLow ? '未找到精确匹配，疑似讹误/辑佚' : '',
     classic_books: CLASSIC_TEXTS.map(b => b.label),
+    draftCard: ancientDraftCard,
   };
 
   // 缓存（古籍 90 天）

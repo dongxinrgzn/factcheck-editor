@@ -259,11 +259,10 @@ body {
   <div class="panel">
     <h2>待查文本</h2>
     <div class="text-input">
-      <textarea id="input-text" placeholder="粘贴需要核查的稿件句子、词条或古文片段..."></textarea>
-      <div class="mode-switch">
-        <label><input type="radio" name="mode" value="single" checked> 单句查证</label>
-        <label><input type="radio" name="mode" value="batch"> 批量查证</label>
-        <label><input type="radio" name="mode" value="entry"> 词条查询</label>
+      <textarea id="input-text" placeholder="粘贴需要查询/验证的文本或古文片段..."></textarea>
+      <div class="mode-tabs">
+        <label><input type="radio" name="mode" value="query" checked> 查询</label>
+        <label><input type="radio" name="mode" value="verify"> 验证</label>
         <label><input type="radio" name="mode" value="ancient"> 古文查证</label>
       </div>
       <div class="btn-row">
@@ -314,7 +313,7 @@ body {
   var state = {
     baseUrl: localStorage.getItem('fc_base_url') || '',
     workerKey: localStorage.getItem('fc_worker_key') || '',
-    mode: 'single',
+    mode: 'query',
     busy: false,
     kbEntries: []
   };
@@ -483,16 +482,16 @@ body {
     }
 
     // 核查报告
-    var rating = data.rating || 'unknown';
-    var ratingClass = rating === 'high' ? 'rating-high' :
-                      rating === 'medium' ? 'rating-medium' : 'rating-low';
+    var rating = data.rating || '未知';
+    var ratingClass = rating === '高' ? 'rating-high' :
+                      rating === '中' ? 'rating-medium' : 'rating-low';
     var html = '<div class="report-section">' +
       '<span class="rating-badge ' + ratingClass + '">真实度：' + rating + '</span></div>';
 
     if (data.ratings && data.ratings.length > 0) {
       html += data.ratings.map(function(r) {
-        var c = r.rating === 'high' ? 'rating-high' :
-                r.rating === 'medium' ? 'rating-medium' : 'rating-low';
+        var c = r.rating === '高' ? 'rating-high' :
+                r.rating === '中' ? 'rating-medium' : 'rating-low';
         var html2 = '<div class="report-section">' +
           '<span class="rating-badge ' + c + '">' + r.rating + '</span>' +
           '<div style="margin-top:8px;"><strong>断言：</strong>' + escapeHtml(r.claim?.claim || '') + '</div>' +
@@ -573,51 +572,8 @@ body {
     $('report-area').innerHTML = '<div class="loading">核查中...</div>';
 
     try {
-      if (state.mode === 'entry') {
-        // 词条查询
-        var data = await apiFetch('/api/kb/query', {
-          method: 'POST',
-          body: JSON.stringify({ keyword: text })
-        });
-        if (data.hit) {
-          renderReport(data);
-          renderResults([]);
-        } else {
-          // 未命中知识库：同时跑 search（检索结果）+ check（核查报告）
-          $('search-results').innerHTML = '<div class="loading">检索中...</div>';
-          $('report-area').innerHTML = '<div class="loading">核查中...</div>';
-          var entryResults = [];
-          var entryReport = null;
-          await Promise.all([
-            (async function() {
-              try {
-                var sr = await apiFetch('/api/search', {
-                  method: 'POST',
-                  body: JSON.stringify({ query: text, prefer_official: true })
-                });
-                // 官方站结果由后端探测真实内容（有结果才返回），★官方标签以后端为准
-                entryResults = sr.results || [];
-              } catch (e) { entryResults = []; }
-            })(),
-            (async function() {
-              try {
-                // 后端自动识别查询/断言模式
-                entryReport = await apiFetch('/api/check', {
-                  method: 'POST',
-                  body: JSON.stringify({ text: text, mode: 'single' })
-                });
-              } catch (e) { entryReport = null; }
-            })()
-          ]);
-          renderResults(entryResults);
-          if (entryReport) {
-            renderReport(entryReport);
-          } else {
-            $('report-area').innerHTML = '<div class="empty-state">核查暂时失败，请稍后重试。</div>';
-          }
-        }
-      } else if (state.mode === 'ancient') {
-        // 古文查证（后端自动识别类型：数学古籍/诗文/科学古籍等）
+      if (state.mode === 'ancient') {
+        // 古文查证
         var ad = await apiFetch('/api/verify-ancient', {
           method: 'POST',
           body: JSON.stringify({ text: text, category: 'auto' })
@@ -628,28 +584,11 @@ body {
           return { title: m.book || m.edition || '', url: m.url || '#', snippet: m.text || '', official_tag: m.edition === 'ctext' };
         });
         renderResults(ancientSources);
-      } else if (state.mode === 'batch') {
-        // 批量查证
-        var lines = text.split('\n').filter(function(l) { return l.trim(); });
-        $('search-results').innerHTML = '<div class="loading">批量查证中（' + lines.length + '行）...</div>';
-        var results = [];
-        for (var i = 0; i < lines.length; i++) {
-          try {
-            var bd = await apiFetch('/api/check', {
-              method: 'POST',
-              body: JSON.stringify({ text: lines[i], mode: 'single' })
-            });
-            results.push({ line: lines[i], data: bd });
-          } catch (e) {
-            results.push({ line: lines[i], error: e.message });
-          }
-        }
-        renderBatchResults(results);
       } else {
-        // 单句查证
+        // 查询 / 验证（统一调 /api/check，后端按 mode 参数走不同分支）
         var cd = await apiFetch('/api/check', {
           method: 'POST',
-          body: JSON.stringify({ text: text, mode: 'single' })
+          body: JSON.stringify({ text: text, mode: state.mode })
         });
         var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
         renderResults(allResults);
@@ -662,23 +601,6 @@ body {
     $('btn-check').textContent = '查证';
     $('btn-check').disabled = false;
   };
-
-  // 批量结果渲染
-  function renderBatchResults(results) {
-    var html = results.map(function(r, i) {
-      if (r.error) {
-        return '<div class="result-item"><div class="title">第' + (i+1) + '行</div>' +
-          '<div class="error-msg">' + escapeHtml(r.error) + '</div></div>';
-      }
-      var rating = r.data.rating || 'unknown';
-      var c = rating === 'high' ? 'rating-high' : rating === 'medium' ? 'rating-medium' : 'rating-low';
-      return '<div class="result-item"><div class="title">第' + (i+1) + '行 ' +
-        '<span class="rating-badge ' + c + '">' + rating + '</span></div>' +
-        '<div class="snippet">' + escapeHtml(r.line) + '</div></div>';
-    }).join('');
-    $('search-results').innerHTML = html;
-    $('report-area').innerHTML = '<div class="empty-state">批量结果见中栏</div>';
-  }
 
   // 提议入库（后端自动核查提取事实并生成词条草稿）
   window._submitDraft = async function() {

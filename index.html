@@ -548,17 +548,50 @@ body {
         });
         if (data.hit) {
           renderReport(data);
-          $('search-results').innerHTML = '<div class="empty-state">已命中知识库</div>';
+          renderResults([]);
         } else {
-          // 回退到检索
-          var sr = await apiFetch('/api/search', {
-            method: 'POST',
-            body: JSON.stringify({ query: text, prefer_official: true })
-          });
-          renderResults(sr.results);
-          renderReport({ rating: 'unknown' });
-          $('report-area').innerHTML = '<div class="empty-state">未命中知识库，已为你检索官方源。' +
-            '<br><button class="btn-secondary" onclick="window._submitDraft()">提议入库</button></div>';
+          // 未命中知识库：同时跑 search（检索结果）+ check（核查报告）
+          $('search-results').innerHTML = '<div class="loading">检索中...</div>';
+          $('report-area').innerHTML = '<div class="loading">核查中...</div>';
+          var entryResults = [];
+          var entryReport = null;
+          await Promise.all([
+            (async function() {
+              try {
+                var sr = await apiFetch('/api/search', {
+                  method: 'POST',
+                  body: JSON.stringify({ query: text, prefer_official: true })
+                });
+                // 给 gov-direct 来源加上标注
+                entryResults = (sr.results || []).map(function(r) {
+                  if (r.source === 'gov-direct') {
+                    r.snippet = '[官方站点搜索入口·点击跳转官网自行搜索] ' + (r.snippet || '');
+                    r.official_tag = false;
+                  }
+                  return r;
+                });
+              } catch (e) { entryResults = []; }
+            })(),
+            (async function() {
+              try {
+                // 把词条名包装成事实断言（补全默认描述），让 check 能提取属性维度
+                var checkText = text.trim();
+                if (!/[。.!?！？]/.test(checkText)) {
+                  checkText = checkText + '的基本信息';
+                }
+                entryReport = await apiFetch('/api/check', {
+                  method: 'POST',
+                  body: JSON.stringify({ text: checkText, mode: 'single' })
+                });
+              } catch (e) { entryReport = null; }
+            })()
+          ]);
+          renderResults(entryResults);
+          if (entryReport) {
+            renderReport(entryReport);
+          } else {
+            $('report-area').innerHTML = '<div class="empty-state">核查暂时失败，请稍后重试。</div>';
+          }
         }
       } else if (state.mode === 'ancient') {
         // 古文查证（后端自动识别类型：数学古籍/诗文/科学古籍等）

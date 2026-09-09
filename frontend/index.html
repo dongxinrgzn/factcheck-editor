@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>编辑校次事实核查助手</title>
+<title>事实查询</title>
 <style>
 :root {
   --bg: #f5f7fa;
@@ -174,20 +174,6 @@ body {
   color: var(--muted);
   margin-top: 4px;
 }
-.source-tabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 12px;
-}
-.source-tabs button {
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.source-tabs button.active { background: var(--accent); color: white; border-color: var(--accent); }
 /* 核查报告栏 */
 .report-section {
   border: 1px solid var(--border);
@@ -259,7 +245,7 @@ body {
 </head>
 <body>
 <div class="topbar">
-  <h1>编辑校次事实核查助手</h1>
+  <h1>事实查询</h1>
   <div class="config">
     <input type="text" id="cfg-url" placeholder="后端地址（如 https://xxx.workers.dev）">
     <input type="text" id="cfg-key" placeholder="Worker Key 或 sk-...">
@@ -276,8 +262,8 @@ body {
       <textarea id="input-text" placeholder="粘贴需要核查的稿件句子、词条或古文片段..."></textarea>
       <div class="mode-switch">
         <label><input type="radio" name="mode" value="single" checked> 单句查证</label>
-        <label><input type="radio" name="mode" value="entry"> 词条查询</label>
         <label><input type="radio" name="mode" value="batch"> 批量查证</label>
+        <label><input type="radio" name="mode" value="entry"> 词条查询</label>
         <label><input type="radio" name="mode" value="ancient"> 古文查证</label>
       </div>
       <div class="btn-row">
@@ -296,11 +282,6 @@ body {
   <!-- 中栏：检索结果 -->
   <div class="panel">
     <h2>检索结果</h2>
-    <div class="source-tabs">
-      <button class="active" data-source="official">官方</button>
-      <button data-source="ancient">古籍</button>
-      <button data-source="all">全网</button>
-    </div>
     <div id="search-results">
       <div class="empty-state">查证后在此显示结果</div>
     </div>
@@ -365,14 +346,6 @@ body {
   // 模式切换
   document.querySelectorAll('input[name="mode"]').forEach(function(r) {
     r.onchange = function() { state.mode = r.value; };
-  });
-
-  // 源切换
-  document.querySelectorAll('.source-tabs button').forEach(function(b) {
-    b.onclick = function() {
-      document.querySelectorAll('.source-tabs button').forEach(function(x) { x.classList.remove('active'); });
-      b.classList.add('active');
-    };
   });
 
   // 统一 fetch 封装
@@ -774,7 +747,7 @@ body {
     $('report-area').innerHTML = '<div class="empty-state">查证后在此显示评级与纠错建议</div>';
   };
 
-  console.log('编辑校次事实核查助手 已加载');
+  console.log('事实查询 已加载');
 })();
 </script>
 </body>

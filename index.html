@@ -423,7 +423,45 @@ body {
       return;
     }
 
-    // 词条卡
+    // 查询模式 → 百科卡片（属性: 数值 + 来源链接）
+    if (data.intent === 'query' && data.factCard) {
+      var fc = data.factCard;
+      var fcHtml = '';
+      if (!fc.facts || fc.facts.length === 0) {
+        fcHtml = '<div class="empty-state">未从权威数据源提取到结构化数据，请查看检索结果。</div>';
+      } else {
+        fcHtml = '<div class="kb-card"><h3>' + escapeHtml(fc.title || '') +
+          '</h3><div style="color:#666;font-size:12px;margin-bottom:8px;">资料来源：维基百科（中英文）</div>';
+        // 按属性分组，同一属性合并中英文数据
+        var groups = {};
+        for (var i = 0; i < fc.facts.length; i++) {
+          var f = fc.facts[i];
+          var key = f.property || '其他';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(f);
+        }
+        for (var prop in groups) {
+          fcHtml += '<div class="kb-fact"><span class="label">' + escapeHtml(prop) + '：</span>';
+          fcHtml += '<span class="value">';
+          var items = groups[prop];
+          for (var j = 0; j < items.length; j++) {
+            fcHtml += escapeHtml(items[j].value || '');
+            if (j < items.length - 1) fcHtml += '<br>';
+          }
+          fcHtml += '</span>';
+          if (items[0].source && items[0].source.url) {
+            fcHtml += '<div class="source">来源：<a href="' + escapeHtml(items[0].source.url) +
+              '" target="_blank" class="ref-link">' + escapeHtml(items[0].source.name || '查看原始词条') + ' ↗</a></div>';
+          }
+          fcHtml += '</div>';
+        }
+        fcHtml += '</div>';
+      }
+      box.innerHTML = fcHtml;
+      return;
+    }
+
+    // 知识库命中词条卡
     if (data.card) {
       var card = data.card;
       var factsHtml = (card.facts || []).map(function(f) {
@@ -574,14 +612,10 @@ body {
             })(),
             (async function() {
               try {
-                // 把词条名包装成事实断言（补全默认描述），让 check 能提取属性维度
-                var checkText = text.trim();
-                if (!/[。.!?！？]/.test(checkText)) {
-                  checkText = checkText + '的基本信息';
-                }
+                // 后端自动识别查询/断言模式
                 entryReport = await apiFetch('/api/check', {
                   method: 'POST',
-                  body: JSON.stringify({ text: checkText, mode: 'single' })
+                  body: JSON.stringify({ text: text, mode: 'single' })
                 });
               } catch (e) { entryReport = null; }
             })()

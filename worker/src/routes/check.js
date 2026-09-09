@@ -52,10 +52,131 @@ export async function handleCheck(request, env) {
 }
 
 /**
+ * 判断输入是"查询"（用户要百科数据）还是"断言"（用户说的一句话要判真伪）
+ * 查询：短文本、无句号、有问号/疑问词、只有名词短语
+ * 断言：完整句子（有主谓宾+标点）、有明确的陈述语气
+ */
+function detectIntent(text) {
+  const t = text.trim();
+  const hasPunct = /[。.!?！？]/.test(t);
+  const hasQuestion = /[？?多少几什么怎样如何是否是不是]/.test(t);
+  const isShort = t.length <= 20;
+  // 有问号必然是查询
+  if (hasQuestion) return 'query';
+  // 没有句号且很短 → 查询（如 "大熊猫 体重"、"鲁迅出生"）
+  if (!hasPunct && isShort && !/是|为|有|称|叫做|生于|卒于|在/.test(t)) return 'query';
+  return 'assertion';
+}
+
+/**
+ * 把维基/英文维基结果中的数据句解析成百科卡片（属性→数值→来源）
+ */
+function buildFactCard(results, entity) {
+  const facts = [];
+  const DATA_LINE_RE = /【数据】([\s\S]*)/;
+  const EN_DATA_PREFIX = '【英文维基数据】';
+  const SYS_PROP = new Set(['海拔', '高度', '栖息', '分布', '活动', '面积', '现存']);
+
+  for (const r of results) {
+    const snip = r.snippet || '';
+    // 中文维基数据句
+    const m = snip.match(DATA_LINE_RE);
+    if (m) {
+      const lines = m[1].split(/(?<=。)/g).map(s => s.trim()).filter(Boolean);
+      for (const line of lines) {
+        if (line.length < 8) continue;
+        // 从中文句子里抽属性词
+        const propM = line.match(/(体重|体长|身高|寿命|年龄|速度|面积|海拔|重量|翼展|跨度|直径|厚度|深度|宽度|长度|产量|人口|分布|栖息|现存|数量|咬合力|出生|逝世)/);
+        if (propM && line.match(/\d|公斤|千克|米|厘米|岁|年|公里|公顷|牛顿/)) {
+          facts.push({ property: propM[1], value: line, source: { name: r.title, url: r.url } });
+        }
+      }
+    }
+    // 英文维基数据句（直接保留原始英文，已含完整数据）
+    const m2 = snip.match(new RegExp(EN_DATA_PREFIX + '([\\s\\S]*)'));
+    if (m2) {
+      const lines = m2[1].split(/(?<=\.)\s+/g).map(s => s.trim()).filter(Boolean);
+      for (const line of lines) {
+        if (line.length < 15) continue;
+        // 粗略属性分类
+        let prop = '其他数据';
+        if (/weigh|weight|kg|kilogram/i.test(line)) prop = '体重';
+        else if (/long|length|meter|cm/i.test(line)) prop = '体长';
+        else if (/old|age|year/i.test(line)) prop = '寿命';
+        else if (/speed|km\/h|mph/i.test(line)) prop = '速度';
+        else if (/elevation|altitude|above sea|m\s/i.test(line)) prop = '海拔';
+        else if (/force|newton|bite/i.test(line)) prop = '咬合力';
+        else if (/population|inhabitant|million|billion/i.test(line)) prop = '数量';
+        facts.push({ property: prop, value: line, source: { name: r.title, url: r.url } });
+      }
+    }
+  }
+
+  // 去重：同一属性保留最完整的一条
+  const seen = new Map();
+  for (const f of facts) {
+    const key = f.property + '|' + f.value.slice(0, 30);
+    if (!seen.has(key)) seen.set(key, f);
+  }
+  return {
+    title: entity || text,
+    facts: [...seen.values()],
+  };
+}
+
+/**
  * 核查核心流程（供 /api/check 与 /api/kb/submit 复用）
- * @returns {Object} { claims, searches, ratings, rating, corrections, draftCard }
+ * @returns {Object} { claims, searches, ratings, rating, corrections, draftCard, factCard? }
  */
 export async function runCheck(text, context, env, apiKey, { autoDraft = false } = {}) {
+  const intent = detectIntent(text.trim());
+
+  // 0. 两种模式共享的：检索（带属性维度 hint）
+  // 先抽属性维度词和实体（如果有的话）
+  const attrM = text.match(ATTR_RE);
+  const hint = attrM ? attrM[1] : '';
+  // 粗略实体提取："大熊猫 体重" → entity="大熊猫"；"鲁迅出生年" → entity="鲁迅"
+  let entity = text.replace(ATTR_RE, '').replace(/[的了是在有？?多少几什么]/g, '').trim();
+  if (hint && !entity) {
+    // 没有实体但有属性词，用户直接问"体重"——需要实体来检索
+    entity = text.replace(hint, '').trim();
+  }
+  const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : text.trim();
+  const whitelist = env.OFFICIAL_WHITELIST
+    ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
+    : ['gov.cn', 'org.cn'];
+
+  let searchResults = null;
+  try {
+    const cacheK = searchCacheKey(searchQuery + '|card');
+    const cached = await cacheGet(env.FACT_CACHE, cacheK);
+    if (cached) {
+      searchResults = cached;
+    } else {
+      const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint });
+      searchResults = annotateResults(raw, env);
+      await cacheSet(env.FACT_CACHE, cacheK, searchResults);
+    }
+  } catch {
+    searchResults = [];
+  }
+
+  // ---------- 分支 A：查询模式 → 百科卡片 ----------
+  if (intent === 'query') {
+    const factCard = buildFactCard(searchResults, entity || text.trim());
+    return {
+      intent: 'query',
+      factCard,
+      searches: [{ query: searchQuery, results: searchResults }],
+      rating: 'info',
+      claims: [],
+      corrections: [],
+      ratings: [],
+      draftCard: null,
+    };
+  }
+
+  // ---------- 分支 B：断言模式 → 事实核查 ----------
   // 1. LLM 提取事实断言
   const extractMsgs = buildExtractFactsMessages(text, context);
   const claims = await callLLMJson({
@@ -69,25 +190,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
 
-  // 2. 对每条断言检索证据（维基百科主源 → DuckDuckGo → SearXNG）
-  const whitelist = env.OFFICIAL_WHITELIST
-    ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
-    : ['gov.cn', 'org.cn'];
-
-  const searchResults = await Promise.all(
+  // 2. 对每条断言检索证据
+  const checkSearches = await Promise.all(
     claims.slice(0, 5).map(async (c) => {
-      // 提取属性维度词（体重/体长/出生…），检索词带维度以命中含数据的段落
-      const attrM = (c.claim || '').match(ATTR_RE);
-      const hint = attrM ? attrM[1] : '';
-      // 用实体名检索（命中主词条），带属性维度；无实体时退回整句
-      const entity = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
-      const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : c.claim;
-      const cacheK = searchCacheKey(searchQuery);
+      const attrM2 = (c.claim || '').match(ATTR_RE);
+      const hint2 = attrM2 ? attrM2[1] : '';
+      const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
+      const sq = entity2 ? (hint2 ? `${entity2} ${hint2}` : entity2) : c.claim;
+      const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
       if (cached) return { claim: c, results: cached, cached: true };
 
       try {
-        const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint });
+        const raw = await braveSearch({ query: sq, preferOfficial: true, topK: 5, whitelist, hint: hint2 });
         const annotated = annotateResults(raw, env);
         await cacheSet(env.FACT_CACHE, cacheK, annotated);
         return { claim: c, results: annotated, cached: false };
@@ -97,9 +212,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     })
   );
 
-  // 3. 对每条断言评级
+  // 3. 评级
   const ratings = await Promise.all(
-    searchResults.map(async (sr) => {
+    checkSearches.map(async (sr) => {
       if (!sr.results || sr.results.length === 0) {
         return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实' };
       }
@@ -119,18 +234,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     })
   );
 
-  // 4. 构建知识库草稿（单点逻辑，事实含纠错结论与对应来源）
-  const draftCard = buildDraftCard(claims, ratings, searchResults);
-
+  // 4. 知识库草稿
+  const draftCard = buildDraftCard(claims, ratings, checkSearches);
   if (autoDraft && draftCard && draftCard.facts.length > 0) {
-    try {
-      await submitDraft(env.FACT_KB, draftCard);
-    } catch {
-      // 入库失败不影响主流程
-    }
+    try { await submitDraft(env.FACT_KB, draftCard); } catch {}
   }
 
-  // 综合评级
   const overall = ratings.every(r => r.rating === 'high')
     ? 'high'
     : ratings.some(r => r.rating === 'low')
@@ -138,13 +247,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false }
     : 'medium';
 
   return {
+    intent: 'assertion',
     claims,
-    searches: searchResults,
+    searches: checkSearches,
     rating: overall,
     corrections: ratings.filter(r => r.correction).map(r => ({
-      claim: r.claim?.claim || '',
-      correction: r.correction,
-      evidence: r.evidence,
+      claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
     ratings,
     draftCard,

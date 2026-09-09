@@ -585,14 +585,31 @@ body {
         });
         renderResults(ancientSources);
       } else {
-        // 查询 / 验证（统一调 /api/check，后端按 mode 参数走不同分支）
-        var cd = await apiFetch('/api/check', {
-          method: 'POST',
-          body: JSON.stringify({ text: text, mode: state.mode })
-        });
-        var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
-        renderResults(allResults);
-        renderReport(cd);
+        // 查询模式：先查知识库，命中直接返回；未命中走 /api/check
+        var kbHit = false;
+        if (state.mode === 'query') {
+          try {
+            var kbData = await apiFetch('/api/kb/query', {
+              method: 'POST',
+              body: JSON.stringify({ keyword: text })
+            });
+            if (kbData.hit && kbData.card) {
+              renderReport(kbData);
+              renderResults([]);
+              kbHit = true;
+            }
+          } catch {}
+        }
+        if (!kbHit) {
+          // 查询 / 验证（统一调 /api/check，后端按 mode 参数走不同分支）
+          var cd = await apiFetch('/api/check', {
+            method: 'POST',
+            body: JSON.stringify({ text: text, mode: state.mode })
+          });
+          var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
+          renderResults(allResults);
+          renderReport(cd);
+        }
       }
     } catch (e) {
       $('report-area').innerHTML = '<div class="error-msg">错误：' + escapeHtml(e.message) + '</div>';

@@ -9,7 +9,7 @@ import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sour
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { submitDraft } from '../utils/kbStore.js';
+import { autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
@@ -338,8 +338,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       } catch { /* LLM 失败则只展示数据卡片 */ }
     }
 
-    // 查询模式也生成 draftCard（供入库用）
+    // 查询模式：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
     let queryDraftCard = null;
+    let queryAutoStored = false;
     if (factCard.facts.length > 0) {
       queryDraftCard = {
         title: entity || text.trim(),
@@ -349,17 +350,32 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           label: f.property || text.trim(),
           value: f.value || '',
           rating: 'high',
-          source: f.source || {},
+          source: {
+            name: f.source?.name || '',
+            url: f.source?.url || '',
+            official_tag: f.source?.official || false,
+            official_score: f.source?.official ? 0.9 : 0.5,
+          },
           verified_at: new Date().toISOString().slice(0, 10),
+          confidence: confidence,
         })),
         references: (searchResults || []).slice(0, 5).map(r => ({
           name: r.title || r.site_name || '',
           url: r.url || '',
           official_tag: r.official_tag || false,
+          official_score: r.official_tag ? 0.9 : 0.5,
         })),
+        confidence_tier: confidence,
       };
-      if (autoDraft) {
-        try { await submitDraft(env.FACT_KB, queryDraftCard); } catch {}
+      if (confidence === '高') {
+        const audit = autoAudit(queryDraftCard);
+        if (audit.pass) {
+          try {
+            const slug = slugify(queryDraftCard.title);
+            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
+            queryAutoStored = true;
+          } catch {}
+        }
       }
     }
 
@@ -375,6 +391,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       corrections: [],
       ratings: [],
       draftCard: queryDraftCard,
+      autoStored: queryAutoStored,
     };
   }
 
@@ -436,13 +453,25 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     })
   );
 
-  // 4. 知识库草稿
+  // 4. 知识库入库：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
-  if (autoDraft && draftCard && draftCard.facts.length > 0) {
-    try { await submitDraft(env.FACT_KB, draftCard); } catch {}
+  let autoStored = false;
+  if (draftCard && draftCard.facts.length > 0) {
+    const overall = ratings.every(r => r.rating === 'high') ? '高'
+      : ratings.some(r => r.rating === 'low') ? '低' : '中';
+    if (overall === '高') {
+      const audit = autoAudit(draftCard);
+      if (audit.pass) {
+        try {
+          const slug = slugify(draftCard.title);
+          await approveEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
+          autoStored = true;
+        } catch {}
+      }
+    }
   }
 
-  const overall = ratings.every(r => r.rating === 'high')
+  const overallFinal = ratings.every(r => r.rating === 'high')
     ? '高'
     : ratings.some(r => r.rating === 'low')
     ? '低'
@@ -455,11 +484,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     intent: 'verify',
     claims,
     searches: checkSearches,
-    rating: overall,
+    rating: overallFinal,
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
     ratings: ratingsCn,
     draftCard,
+    autoStored,
   };
 }

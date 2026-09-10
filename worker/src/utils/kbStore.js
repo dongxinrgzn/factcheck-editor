@@ -59,6 +59,69 @@ export function slugify(title) {
 }
 
 /**
+ * 国别/地区限定词表：[规范名, 同义词...]
+ * 用于防止"美国GDP"误命中"国内（中国）生产总值"这类地区冲突。
+ */
+const REGION_WORDS = [
+  ['中国', ['中国', '国内', '我国', '全国', '中方', '中华', '大陆']],
+  ['美国', ['美国', '美方', '全美']],
+  ['日本', ['日本', '日方']],
+  ['德国', ['德国', '德方']],
+  ['法国', ['法国', '法方']],
+  ['英国', ['英国', '英方']],
+  ['俄罗斯', ['俄罗斯', '俄方', '俄国']],
+  ['印度', ['印度']],
+  ['巴西', ['巴西']],
+  ['韩国', ['韩国', '韩方']],
+  ['朝鲜', ['朝鲜']],
+  ['加拿大', ['加拿大']],
+  ['澳大利亚', ['澳大利亚', '澳洲']],
+  ['意大利', ['意大利']],
+  ['西班牙', ['西班牙']],
+  ['欧盟', ['欧盟', '欧元区']],
+  ['新加坡', ['新加坡']],
+  ['泰国', ['泰国']],
+  ['越南', ['越南']],
+  ['印尼', ['印尼', '印度尼西亚']],
+  ['马来西亚', ['马来西亚']],
+  ['菲律宾', ['菲律宾']],
+  ['墨西哥', ['墨西哥']],
+  ['南非', ['南非']],
+  ['埃及', ['埃及']],
+  ['土耳其', ['土耳其']],
+  ['乌克兰', ['乌克兰']],
+  ['波兰', ['波兰']],
+  ['荷兰', ['荷兰']],
+  ['瑞士', ['瑞士']],
+  ['瑞典', ['瑞典']],
+  ['阿根廷', ['阿根廷']],
+  ['沙特', ['沙特']],
+  ['伊朗', ['伊朗']],
+  ['巴基斯坦', ['巴基斯坦']],
+  ['孟加拉国', ['孟加拉国', '孟加拉']],
+  ['香港', ['香港']],
+  ['台湾', ['台湾', '臺灣']],
+  ['澳门', ['澳门', '澳門']],
+];
+
+function regionsOf(text, isQuery = false) {
+  const hits = new Set();
+  if (!text) return hits;
+  let s = text;
+  if (isQuery) {
+    // 查询中"国内生产总值"是 GDP 固定术语（日本国内生产总值=日本GDP），
+    // 其中的"国内"不指中国，识别地区前先剔除该术语
+    s = s.replace(/国内生[产產][总總]值/g, '');
+  }
+  for (const [canon, words] of REGION_WORDS) {
+    for (const w of words) {
+      if (s.includes(w)) { hits.add(canon); break; }
+    }
+  }
+  return hits;
+}
+
+/**
  * 查询词条卡（先查缓存 → 别名 → 主键）
  * @returns {Object} {hit, card}
  */
@@ -115,6 +178,9 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
       return hit / tb.size;
     };
 
+    // 查询中的国别/地区限定词（循环外只算一次；查询侧剔除GDP术语中的"国内"）
+    const kwRegions = regionsOf(kw, true);
+
     const list = await kv.list({ prefix: 'kb:', limit: 200 });
     const keys = list.keys || list || [];
     let bestMatch = null;
@@ -129,6 +195,18 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
         if (card.status !== 'verified' && card.status !== 'auto_verified') continue;
         const title = (card.title || '').toLowerCase();
         const aliases = (card.aliases || []).map(a => String(a).toLowerCase());
+        const titleChars = (title + ' ' + aliases.join(' ')).replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+
+        // 国别/地区冲突：查询与词条标题分属不同地区 → 该词条不参与匹配
+        // （如"美国GDP"不能命中"国内（中国）生产总值"卡；无地区属性的词条如大熊猫不受影响）
+        if (kwRegions.size > 0) {
+          const cardRegions = regionsOf(titleChars);
+          if (cardRegions.size > 0) {
+            let sameRegion = false;
+            for (const rg of kwRegions) if (cardRegions.has(rg)) { sameRegion = true; break; }
+            if (!sameRegion) continue;
+          }
+        }
 
         // 双向包含（标题/别名）→ 直接命中
         if (title.includes(kw) || kw.includes(title) || aliases.some(a => a.includes(kw) || kw.includes(a))) {
@@ -137,10 +215,9 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
           break;
         }
 
-        // 标题/别名 bigram 匹配（kw 覆盖率 与 标题覆盖率 取大，阈值 0.6）
-        const titleChars = (title + ' ' + aliases.join(' ')).replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+        // 标题/别名 bigram 匹配（kw 覆盖率 与 标题覆盖率 取大，阈值 0.72）
         const tScore = Math.max(overlap(titleChars), coverage(titleChars));
-        if (tScore >= 0.6) {
+        if (tScore >= 0.72) {
           if (tScore > bestScore) { bestScore = tScore; bestMatch = r; }
           continue;
         }

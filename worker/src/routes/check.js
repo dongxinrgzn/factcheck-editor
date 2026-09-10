@@ -148,29 +148,16 @@ const INDICATORS = [
   ['population', '种群数量'], ['inhabitants', '种群数量'],
 ];
 
-function classifyProp(sentence, forQuery = false) {
+function classifyProp(sentence) {
   const s = String(sentence || '');
   // 增长率强信号优先：含增长语义 + 百分比（中英文）。
   // 必须放在"国内生产总值/GDP"之前，否则"GDP年化增长率为3.9%"会被误标成"国内生产总值"总量指标。
-  // 查询问题本身不含数据，forQuery 时跳过此类数据句判断。
-  if (!forQuery
-      && /(增长|增速|增幅|涨幅|同比|环比|grew|growth|annual(?:ized)?\s*rate|increased?|expanded|rose|raised?|surge|climb)/i.test(s)
+  if (/(增长|增速|增幅|涨幅|同比|环比|grew|growth|annual(?:ized)?\s*rate|increased?|expanded|rose|raised?|surge|climb)/i.test(s)
       && /(%|％|percent|百分点)/i.test(s)) {
     return '增长率';
   }
   for (const [kw, prop] of INDICATORS) {
-    if (s.includes(kw)) {
-      // GDP/生产总值 总量句二次校验：必须是"总量"而非人均/占比/财政碎片，且含货币/总量单位词；
-      // 仅顺带提到"GDP"字样的百分比句（如"供应商交付指数50.6%…GDP[…]”）不是总量数据，降级。
-      // 注意：查询问题本身（如"生产总值是多少"）不含数值，forQuery 时不能做此校验。
-      if (!forQuery && prop === '国内生产总值') {
-        if (/人均|per\s*capita/i.test(s)) return '相关数据';            // 人均GDP不是总量
-        if (/(占|占比|比重|比值|相当于).{0,12}(GDP|生产总值)|(GDP|生产总值).{0,12}(占比|比重|比值)|(?:%|percent)\s*of\s+GDP/i.test(s)) return '相关数据'; // "X% of GDP/占GDP比重"是占比句
-        const hasMoney = /(万亿|千亿|百亿|十亿|亿|万|trillion|billion|million|dollars?|USD|RMB|yuan|欧元|日元|港元|元)/i.test(s);
-        if (!hasMoney) return '相关数据';
-      }
-      return prop;
-    }
+    if (s.includes(kw)) return prop;
   }
   return null;
 }
@@ -194,7 +181,7 @@ function buildFactCard(results, entity, queryText = '') {
   const yearM = String(queryText || '').match(/(19|20)\d{2}/);
   const wantYear = yearM ? yearM[0] : '';
   // 查询问的指标（如问"生产总值"→总量句优先于增长率句，避免中文增长率官方句把英文总量句挤出）
-  const queryProp = classifyProp(String(queryText || ''), true) || '';
+  const queryProp = classifyProp(String(queryText || '')) || '';
 
   for (const r of sorted) {
     // 语种判断必须在清洗前、基于原始摘要：含拉丁字母且无 CJK 汉字即按英文处理。
@@ -379,35 +366,49 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   if (intent === 'query') {
     const factCard = buildFactCard(searchResults, entity || text.trim(), text);
 
-    // 基于检索到的权威数据，让 LLM 生成一句话直接解答并评估可信度
+    // 基于原始检索结果，让 LLM 直接提取数据并生成一句话解答。
+    // 不再依赖 buildFactCard 的正则过滤结果——正则会漏掉表格、含特殊符号的英文页面等，
+    // 把原始摘要直接喂给 LLM，让它自行理解、提取、分类。
     let answer = '';
     let confidence = 'low';
     let confidenceReason = '';
-    if (factCard.facts.length > 0) {
+    if (searchResults && searchResults.length > 0) {
       try {
-        const dataText = factCard.facts
-          .map(f => `[${f.property}] ${f.value}（来源：${f.source.name}）`)
-          .join('\n');
+        // 从原始检索结果构建 LLM 输入：取前 20 条，每条轻量清洗后截断到 350 字
+        const rawDataText = searchResults.slice(0, 20)
+          .map((r, i) => {
+            const snip = String(r.snippet || '')
+              .replace(/```[\s\S]*?```/g, ' ')
+              .replace(/\*{1,3}/g, '')
+              .replace(/#{1,6}\s*/g, '')
+              .replace(/`+/g, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 350);
+            const tag = r.official_tag ? ' [官方]' : '';
+            return `[${i + 1}] ${r.title || ''}${tag}\n${snip}\nURL: ${r.url || ''}`;
+          })
+          .join('\n\n');
         const llmResp = await callLLMJson({
           messages: [
             {
               role: 'system',
               content: [
-                '你是资料核查助手。根据检索到的权威数据，直接回答用户的问题，并评估数据可信度。',
-                '回答规则：',
-                '1. 先判断用户问的核心指标：总量/规模（如"生产总值是多少"）、增长率/增速、人均值、排名等；',
-                '2. 只能用与问题"同一指标"的数据作答。严禁用增长率、年化增长率、预估值冒充总量——例如问"生产总值是多少"时，不能回答"增长率为3.9%"；',
-                '3. 若检索数据中没有该指标的直接数据：answer 必须先明确说明"未检索到〈指标〉的权威总量数据"，再附上检索到的相关指标（注明那是什么指标），不得让用户误以为它就是答案；',
-                '4. 数值必须忠实于检索数据，年份、地区必须与问题一致，禁止用相邻年份（如用2024年数据回答2025年问题）而不标注年份；',
-                '5. 有直接数据时 answer 含具体数值和单位；没有时如实说明，不要编造或凑数。',
-                '6. 单位必须与证据严格一致，英文单位换算：1 trillion = 万亿，1 billion = 十亿（10亿），1 million = 百万。例如"30,769.70 billion US dollars"="约30.77万亿美元"，"30.8 trillion dollars"="30.8万亿美元"；严禁把"30769.70 billion美元"误写成"30769.70亿美元"（那会错10倍）。拿不准换算时直接保留原单位表述。',
-                '可信度判定：多个独立权威来源的同一指标数据一致→"高"；仅单一来源、约数/范围、或只有相关指标而无直接答案→"中"；数据缺失或相互矛盾→"低"。',
-                '只输出 JSON：{"answer":"一句话直接解答","confidence":"高或中或低","reason":"说明依据（来源数量、是否同一指标、是否预测值）"}，不要解释。',
+                '你是资料核查助手。下面是检索引擎返回的多条网页摘要（含标题、正文片段、URL，标记[官方]的为官方来源）。',
+                '请从中提取与用户问题直接相关的数据，生成一句话解答，并评估可信度。',
+                '规则：',
+                '1. 只能用与问题"同一指标"的数据作答——问总量不能用增长率代替，问增长率不能用总量代替；',
+                '2. 若摘要中没有该指标的直接数据：如实说明"未检索到〈指标〉的权威数据"，不得用相关指标冒充；',
+                '3. 年份、地区必须与问题一致，用相邻年份数据时必须标注；',
+                '4. 英文单位换算要准确：trillion=万亿，billion=十亿，million=百万；',
+                '5. 数值忠实于来源，不要编造或凑数。',
+                '可信度判定：多个独立来源同一指标数据一致→"高"；仅单一来源或约数→"中"；数据缺失或矛盾→"低"。',
+                '只输出 JSON：{"answer":"一句话直接解答","confidence":"高或中或低","reason":"说明依据"}',
               ].join('\n'),
             },
             {
               role: 'user',
-              content: `用户查询：${text}\n\n检索到的权威数据（方括号内为指标名）：\n${dataText}\n\n请输出 JSON。`,
+              content: `用户查询：${text}\n\n检索结果：\n${rawDataText}`,
             },
           ],
           apiKey,

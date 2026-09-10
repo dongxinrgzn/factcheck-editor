@@ -410,9 +410,17 @@ export function autoAudit(card) {
     reasons.push('无官方或百科来源');
   }
 
-  // ② 多源交叉验证：references 中至少2个独立域名
+  // ② 多源交叉验证：facts 来源 + references 中至少2个独立域名
   const refs = card.references || [];
   const domains = new Set();
+  for (const f of card.facts) {
+    try {
+      if (f.source && f.source.url) {
+        const h = new URL(f.source.url).hostname.replace(/^www\./, '');
+        domains.add(h);
+      }
+    } catch {}
+  }
   for (const r of refs) {
     try {
       const h = new URL(r.url).hostname.replace(/^www\./, '');

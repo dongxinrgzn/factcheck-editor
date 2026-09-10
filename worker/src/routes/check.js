@@ -9,7 +9,7 @@ import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sour
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { submitDraft, queryEntry } from '../utils/kbStore.js';
+import { submitDraft, queryEntry, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
@@ -198,7 +198,12 @@ function buildFactCard(results, entity, queryText = '') {
       .replace(/\|+/g, isEn ? ', ' : '，')    // 表格分隔（英文页用英文逗号，避免全角字符污染英文切句）
       .replace(/^[\s>·•\-–—*]+/gm, '');       // 行首符号
     const srcName = r.site_name || r.title || '来源';
-    const source = { name: srcName, url: r.url, official: r.source === 'gov-direct' || !!r.official_tag };
+    const source = {
+      name: srcName, url: r.url,
+      official: r.source === 'gov-direct' || !!r.official_tag,
+      official_tag: r.official_tag || (r.source === 'gov-direct'),
+      official_score: r.official_score || (r.official_tag ? 0.9 : 0.5),
+    };
 
     // 切句并提取数据句（中文按句号/分号/换行切分，换行也算边界，避免标题与正文连成一句）
     let sentences = [];
@@ -266,10 +271,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     entity = text.replace(hint, '').trim();
   }
   const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : text.trim();
-  // 总量型问题（"X生产总值是多少"）补充检索词：默认检索词容易只召回"增长率/增速"文章，
-  // 追加"总量 万亿美元"以召回 GDP 规模数据
-  const isAmountQuestion = /多少|总量|规模|有多大/.test(text) && /生产总值|GDP|经济总量/i.test(text);
-  const searchQueryExtra = isAmountQuestion ? `${searchQuery} 总量 万亿美元` : null;
+  // GDP/生产总值相关问题：追加"总量 万亿美元"补充检索，并触发英文 Tavily 检索
+  // 不要求问法含"是多少/多少"——"2025年美国生产总值"和"...是多少"应同等处理
+  const isGdpQuestion = /生产总值|GDP|gdp|经济总量|国内生产/i.test(text);
+  const isAmountQuestion = isGdpQuestion; // 只要含 GDP 关键词就走总量检索路径
+  const searchQueryExtra = isGdpQuestion ? `${searchQuery} 总量 万亿美元` : null;
   const whitelist = env.OFFICIAL_WHITELIST
     ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
     : ['gov.cn', 'org.cn'];
@@ -423,8 +429,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       } catch { /* LLM 失败则只展示数据卡片 */ }
     }
 
-    // 查询模式也生成 draftCard（供入库用）
+    // 查询模式也生成 draftCard（供前端展示"入库"按钮用）
+    // 入库策略：可信度"高"→ 自动入库（auto_verified）；"中"/"低"→ 不自动入库，前端可选入库
     let queryDraftCard = null;
+    let autoStored = false;
     if (factCard.facts.length > 0) {
       queryDraftCard = {
         title: entity || text.trim(),
@@ -434,17 +442,33 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           label: f.property || text.trim(),
           value: f.value || '',
           rating: 'high',
-          source: f.source || {},
+          source: {
+            name: f.source?.name || '',
+            url: f.source?.url || '',
+            official_tag: f.source?.official || false,
+            official_score: f.source?.official ? 0.9 : 0.5,
+          },
           verified_at: new Date().toISOString().slice(0, 10),
+          confidence: confidence,
         })),
         references: (searchResults || []).slice(0, 5).map(r => ({
           name: r.title || r.site_name || '',
           url: r.url || '',
           official_tag: r.official_tag || false,
+          official_score: r.official_tag ? 0.9 : 0.5,
         })),
+        confidence_tier: confidence, // 按可信度分类：高/中/低
       };
-      if (autoDraft) {
-        try { await submitDraft(env.FACT_KB, queryDraftCard); } catch {}
+      // 可信度"高"且 autoAudit 通过 → 自动入库
+      if (confidence === '高') {
+        const audit = autoAudit(queryDraftCard);
+        if (audit.pass) {
+          try {
+            const slug = slugify(queryDraftCard.title);
+            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
+            autoStored = true;
+          } catch {}
+        }
       }
     }
 
@@ -460,6 +484,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       corrections: [],
       ratings: [],
       draftCard: queryDraftCard,
+      autoStored,
     };
   }
 

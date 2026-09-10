@@ -39,9 +39,10 @@ export async function handleKbSubmit(request, env) {
     return jsonResponse({ ok: true, data: { items } }, 200, request);
   }
 
-  // 审核通过
+  // 审核通过 / 手动入库
   if (action === 'approve') {
-    const { slug, card: approveCard, timestamp } = body;
+    const { slug: rawSlug, card: approveCard, timestamp } = body;
+    const slug = rawSlug || (approveCard ? slugify(approveCard.title) : '');
     if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
     let incomingCard = approveCard;
     // 未直接带卡片时，从待审队列读取草稿

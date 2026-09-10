@@ -5,7 +5,7 @@ import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, searchCacheKey } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
-import { braveSearch, filterRelevant, entityTermOf } from '../sources/brave.js';
+import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
@@ -82,6 +82,44 @@ function relatedKbFacts(facts, text) {
   return related.length > 0 ? related : facts;
 }
 
+// 外国中文国名 → 英文（用于英文 Tavily 检索：外国宏观数据总量在 BEA/IMF/世行等英文源最全）
+const FOREIGN_GDP_EN = {
+  '美国': 'United States', '日本': 'Japan', '德国': 'Germany', '英国': 'United Kingdom',
+  '法国': 'France', '印度': 'India', '韩国': 'South Korea', '加拿大': 'Canada',
+  '巴西': 'Brazil', '俄罗斯': 'Russia', '澳大利亚': 'Australia', '意大利': 'Italy',
+  '西班牙': 'Spain', '墨西哥': 'Mexico', '印度尼西亚': 'Indonesia', '印尼': 'Indonesia',
+  '荷兰': 'Netherlands', '瑞士': 'Switzerland', '沙特': 'Saudi Arabia', '土耳其': 'Turkey',
+  '波兰': 'Poland', '瑞典': 'Sweden', '比利时': 'Belgium', '爱尔兰': 'Ireland',
+  '以色列': 'Israel', '阿根廷': 'Argentina', '泰国': 'Thailand', '越南': 'Vietnam',
+  '新加坡': 'Singapore', '马来西亚': 'Malaysia', '菲律宾': 'Philippines', '南非': 'South Africa',
+  '阿联酋': 'United Arab Emirates', '埃及': 'Egypt', '乌克兰': 'Ukraine', '欧盟': 'European Union',
+  '新西兰': 'New Zealand', '挪威': 'Norway', '丹麦': 'Denmark', '芬兰': 'Finland',
+  '奥地利': 'Austria', '希腊': 'Greece', '葡萄牙': 'Portugal', '捷克': 'Czech Republic',
+  '智利': 'Chile', '哥伦比亚': 'Colombia', '巴基斯坦': 'Pakistan', '孟加拉国': 'Bangladesh',
+};
+const CHINA_WORDS = ['中国', '国内', '我国', '全国', '中方'];
+// 识别"外国+GDP总量"问题并构造英文检索词；问中国的返回 null
+function foreignGdpEnQuery(text) {
+  // "国内生产总值"是 GDP 固定术语（美国国内生产总值=美国GDP），先剔除再判断中国词
+  const t = String(text || '').replace(/国内生[产產][总總]值/g, '');
+  if (CHINA_WORDS.some(w => t.includes(w))) return null;
+  const yearM = t.match(/(?:19|20)\d{2}/);
+  for (const [zh, en] of Object.entries(FOREIGN_GDP_EN)) {
+    if (t.includes(zh)) {
+      const year = yearM ? yearM[0] : '';
+      return {
+        zh,
+        en,
+        year,
+        // 全网检索用长词；官方域名定向用短词（长词在官方站内召回率低）
+        query: `${en} nominal GDP ${year} gross domestic product total trillion dollars`.replace(/\s+/g, ' ').trim(),
+        shortQuery: `${en} GDP ${year} current-dollar trillion`.replace(/\s+/g, ' ').trim(),
+      };
+    }
+  }
+  return null;
+}
+
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
 const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
 const EN_UNIT = '(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km/h|mph|years?|yrs?|hectares?|percent|%)';
@@ -110,9 +148,29 @@ const INDICATORS = [
   ['population', '种群数量'], ['inhabitants', '种群数量'],
 ];
 
-function classifyProp(sentence) {
+function classifyProp(sentence, forQuery = false) {
+  const s = String(sentence || '');
+  // 增长率强信号优先：含增长语义 + 百分比（中英文）。
+  // 必须放在"国内生产总值/GDP"之前，否则"GDP年化增长率为3.9%"会被误标成"国内生产总值"总量指标。
+  // 查询问题本身不含数据，forQuery 时跳过此类数据句判断。
+  if (!forQuery
+      && /(增长|增速|增幅|涨幅|同比|环比|grew|growth|annual(?:ized)?\s*rate|increased?|expanded|rose|raised?|surge|climb)/i.test(s)
+      && /(%|％|percent|百分点)/i.test(s)) {
+    return '增长率';
+  }
   for (const [kw, prop] of INDICATORS) {
-    if (sentence.includes(kw)) return prop;
+    if (s.includes(kw)) {
+      // GDP/生产总值 总量句二次校验：必须是"总量"而非人均/占比/财政碎片，且含货币/总量单位词；
+      // 仅顺带提到"GDP"字样的百分比句（如"供应商交付指数50.6%…GDP[…]”）不是总量数据，降级。
+      // 注意：查询问题本身（如"生产总值是多少"）不含数值，forQuery 时不能做此校验。
+      if (!forQuery && prop === '国内生产总值') {
+        if (/人均|per\s*capita/i.test(s)) return '相关数据';            // 人均GDP不是总量
+        if (/(占|占比|比重|比值|相当于).{0,12}(GDP|生产总值)|(GDP|生产总值).{0,12}(占比|比重|比值)|(?:%|percent)\s*of\s+GDP/i.test(s)) return '相关数据'; // "X% of GDP/占GDP比重"是占比句
+        const hasMoney = /(万亿|千亿|百亿|十亿|亿|万|trillion|billion|million|dollars?|USD|RMB|yuan|欧元|日元|港元|元)/i.test(s);
+        if (!hasMoney) return '相关数据';
+      }
+      return prop;
+    }
   }
   return null;
 }
@@ -135,8 +193,14 @@ function buildFactCard(results, entity, queryText = '') {
   // 查询中的年份（如 2025），优先保留含该年份的数据句
   const yearM = String(queryText || '').match(/(19|20)\d{2}/);
   const wantYear = yearM ? yearM[0] : '';
+  // 查询问的指标（如问"生产总值"→总量句优先于增长率句，避免中文增长率官方句把英文总量句挤出）
+  const queryProp = classifyProp(String(queryText || ''), true) || '';
 
   for (const r of sorted) {
+    // 语种判断必须在清洗前、基于原始摘要：含拉丁字母且无 CJK 汉字即按英文处理。
+    // （不能用纯 ASCII 判断——€£等符号、表格|替换成的中文逗号都会误判；tradingeconomics 表格、countryeconomy 含€都靠此放行）
+    const rawHead = String(r.snippet || '').slice(0, 60);
+    const isEn = /[a-zA-Z]/.test(rawHead) && !/[\u4e00-\u9fff]/.test(rawHead);
     const snip = (r.snippet || '')
       .replace(/【[^】]*】/g, ' ')
       .replace(/```[\s\S]*?```/g, ' ')       // 代码块
@@ -144,9 +208,8 @@ function buildFactCard(results, entity, queryText = '') {
       .replace(/\*{1,3}/g, '')
       .replace(/#{1,6}\s*/g, '')              // markdown 标题符
       .replace(/`+/g, '')
-      .replace(/\|+/g, '，')                  // 表格分隔
+      .replace(/\|+/g, isEn ? ', ' : '，')    // 表格分隔（英文页用英文逗号，避免全角字符污染英文切句）
       .replace(/^[\s>·•\-–—*]+/gm, '');       // 行首符号
-    const isEn = /^[\x00-\x7F\s.,;:%()\-–—+]*$/.test(snip.slice(0, 60)) && /[a-zA-Z]/.test(snip.slice(0, 60));
     const srcName = r.site_name || r.title || '来源';
     const source = { name: srcName, url: r.url, official: r.source === 'gov-direct' || !!r.official_tag };
 
@@ -162,21 +225,27 @@ function buildFactCard(results, entity, queryText = '') {
 
     for (let s0 of sentences) {
       const s = s0.replace(/\s+/g, ' ').trim();
-      if (s.length < 8 || s.length > 160) continue;
+      if (s.length < 8 || s.length > (isEn ? 260 : 160)) continue;
       // 跳过网页页脚/备案/导航噪音，以及纯标题（无句读且过短的导航词）
       if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图|首页|上一篇|下一篇|点击下载|字体大小|分享到/.test(s)) continue;
-      const hasData = isEn ? /\d[\d.,\-–—~]*\s*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
+      const hasData = isEn ? /\d[\d.,\-–—~]*[\s，,|]*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
         : new RegExp('\\d[\\d.,，\\-－—~～至到]*\\s*' + CN_UNIT).test(s);
       if (!hasData) continue;
       const prop = classifyProp(s) || '相关数据';
       // 含目标年份的句子加权排前
       const yearHit = wantYear && s.includes(wantYear);
-      facts.push({ property: prop, value: s, source, yearHit, official: source.official });
+      // 与查询所问指标一致（问总量时总量句排前）
+      const propMatch = queryProp && prop === queryProp;
+      facts.push({ property: prop, value: s, source, yearHit, propMatch, official: source.official });
     }
   }
 
-  // 排序：官方优先 → 含目标年份优先
-  facts.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
+  // 排序：与查询指标一致 → 官方优先 → 含目标年份优先
+  // （指标匹配必须排在官方性之前：问总量时，非官方的总量句也比官方的增长率句更相关）
+  facts.sort((a, b) =>
+    (b.propMatch ? 1 : 0) - (a.propMatch ? 1 : 0) ||
+    (b.official ? 1 : 0) - (a.official ? 1 : 0) ||
+    (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
 
   // 去重：同属性+相似开头只留一条（优先官方/含年份）
   const seen = new Set();
@@ -186,7 +255,7 @@ function buildFactCard(results, entity, queryText = '') {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(f);
-    if (out.length >= 12) break;
+    if (out.length >= 18) break;
   }
 
   return { title: entity || queryText || '', facts: out };
@@ -210,6 +279,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     entity = text.replace(hint, '').trim();
   }
   const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : text.trim();
+  // 总量型问题（"X生产总值是多少"）补充检索词：默认检索词容易只召回"增长率/增速"文章，
+  // 追加"总量 万亿美元"以召回 GDP 规模数据
+  const isAmountQuestion = /多少|总量|规模|有多大/.test(text) && /生产总值|GDP|经济总量/i.test(text);
+  const searchQueryExtra = isAmountQuestion ? `${searchQuery} 总量 万亿美元` : null;
   const whitelist = env.OFFICIAL_WHITELIST
     ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
     : ['gov.cn', 'org.cn'];
@@ -229,11 +302,70 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     searchResults = [];
   }
 
+  // 总量型问题：用补充检索词再搜一次（总量/万亿美元），按 URL 去重合并
+  if (searchQueryExtra) {
+    try {
+      const cacheK2 = searchCacheKey(searchQueryExtra + '|card');
+      let extra = await cacheGet(env.FACT_CACHE, cacheK2);
+      if (!extra) {
+        const raw2 = await braveSearch({ query: searchQueryExtra, preferOfficial: true, topK: 5, whitelist, hint });
+        extra = annotateResults(raw2, env);
+        await cacheSet(env.FACT_CACHE, cacheK2, extra);
+      }
+      const seen = new Set((searchResults || []).map(r => r.url));
+      for (const r of extra || []) {
+        if (r.url && !seen.has(r.url)) { searchResults.push(r); seen.add(r.url); }
+      }
+    } catch { /* 补充检索失败忽略 */ }
+  }
+
+  // 外国 GDP 总量问题：英文 Tavily 检索（BEA/IMF/世界银行的总量数据英文源最全）
+  const enGdp = isAmountQuestion && /生产总值|GDP|gdp|国内生产/i.test(text) ? foreignGdpEnQuery(text) : null;
+  if (enGdp) {
+    try {
+      const cacheK3 = searchCacheKey('en|' + enGdp.query);
+      let enRes = await cacheGet(env.FACT_CACHE, cacheK3);
+      if (!enRes) {
+        // 轮1：全网英文（长词）；轮2：官方/权威数据站定向（短词，官方站内召回率更高）
+        const econDomains = ['bea.gov', 'imf.org', 'worldbank.org', 'oecd.org',
+          'tradingeconomics.com', 'statista.com', 'ceicdata.com', 'countryeconomy.com'];
+        const [tv, tvOff] = await Promise.all([
+          tavilySearch(enGdp.query, { apiKey: env.TAVILY_KEY, topK: 6, searchDepth: 'advanced' }),
+          tavilySearch(enGdp.shortQuery, {
+            apiKey: env.TAVILY_KEY, topK: 8, searchDepth: 'advanced',
+            includeDomains: econDomains,
+          }),
+        ]);
+        const merged = [...(tvOff.results || []), ...(tv.results || [])];
+        // Tavily 综合答案（通常直接含"GDP was $xx trillion in 2025"总量句）作为高优先级来源
+        const tavilyAnswer = tvOff.answer || tv.answer;
+        if (tavilyAnswer) {
+          merged.unshift({
+            title: `${enGdp.en} GDP ${enGdp.year}（检索引擎综合答案）`,
+            url: 'https://app.tavily.com/',
+            snippet: tavilyAnswer,
+            source: 'tavily',
+          });
+        }
+        enRes = annotateResults(merged, env);
+        await cacheSet(env.FACT_CACHE, cacheK3, enRes);
+      }
+      const seen3 = new Set((searchResults || []).map(r => r.url));
+      for (const r of enRes || []) {
+        if (r.url && !seen3.has(r.url)) { searchResults.push(r); seen3.add(r.url); }
+      }
+    } catch { /* 英文检索失败忽略 */ }
+  }
+
   // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
   if (intent === 'query') {
     try {
-      const govRaw = await searchGovDirect(searchQuery, { apiKey: env.TAVILY_KEY });
-      const govAnnotated = annotateResults(govRaw, env);
+      // 总量问题并发检索官方站的原始词与补充词
+      const govQueries = [searchQuery, searchQueryExtra].filter(Boolean);
+      const govSettled = await Promise.all(
+        govQueries.map(q => searchGovDirect(q, { apiKey: env.TAVILY_KEY }).catch(() => []))
+      );
+      const govAnnotated = govSettled.flatMap(g => annotateResults(g, env));
       // 官方结果排前合并
       searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
       // 相关性过滤：剔除只在正文顺带提及实体的无关词条（如查"大熊猫"却召回"犬/郊狼/柳江人"）
@@ -260,13 +392,22 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           messages: [
             {
               role: 'system',
-              content: '你是资料核查助手。根据检索到的权威数据，直接回答用户的问题，并评估数据可信度。' +
-                '可信度判定：多个独立权威来源数据一致、或有明确数值出处→"高"；仅单一来源或数据为约数/范围→"中"；数据缺失或相互矛盾→"低"。' +
-                '只输出 JSON：{"answer":"针对用户问题的一句话直接解答，必须含具体数值和单位","confidence":"高或中或低","reason":"一句话说明可信度依据（来源数量、是否一致）"}，不要解释。',
+              content: [
+                '你是资料核查助手。根据检索到的权威数据，直接回答用户的问题，并评估数据可信度。',
+                '回答规则：',
+                '1. 先判断用户问的核心指标：总量/规模（如"生产总值是多少"）、增长率/增速、人均值、排名等；',
+                '2. 只能用与问题"同一指标"的数据作答。严禁用增长率、年化增长率、预估值冒充总量——例如问"生产总值是多少"时，不能回答"增长率为3.9%"；',
+                '3. 若检索数据中没有该指标的直接数据：answer 必须先明确说明"未检索到〈指标〉的权威总量数据"，再附上检索到的相关指标（注明那是什么指标），不得让用户误以为它就是答案；',
+                '4. 数值必须忠实于检索数据，年份、地区必须与问题一致，禁止用相邻年份（如用2024年数据回答2025年问题）而不标注年份；',
+                '5. 有直接数据时 answer 含具体数值和单位；没有时如实说明，不要编造或凑数。',
+                '6. 单位必须与证据严格一致，英文单位换算：1 trillion = 万亿，1 billion = 十亿（10亿），1 million = 百万。例如"30,769.70 billion US dollars"="约30.77万亿美元"，"30.8 trillion dollars"="30.8万亿美元"；严禁把"30769.70 billion美元"误写成"30769.70亿美元"（那会错10倍）。拿不准换算时直接保留原单位表述。',
+                '可信度判定：多个独立权威来源的同一指标数据一致→"高"；仅单一来源、约数/范围、或只有相关指标而无直接答案→"中"；数据缺失或相互矛盾→"低"。',
+                '只输出 JSON：{"answer":"一句话直接解答","confidence":"高或中或低","reason":"说明依据（来源数量、是否同一指标、是否预测值）"}，不要解释。',
+              ].join('\n'),
             },
             {
               role: 'user',
-              content: `用户查询：${text}\n\n检索到的权威数据：\n${dataText}\n\n请输出 JSON。`,
+              content: `用户查询：${text}\n\n检索到的权威数据（方括号内为指标名）：\n${dataText}\n\n请输出 JSON。`,
             },
           ],
           apiKey,

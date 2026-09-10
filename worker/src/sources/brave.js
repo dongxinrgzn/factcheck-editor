@@ -60,6 +60,61 @@ export function filterRelevant(results, entity) {
   }
   const latinTokens = (core.match(/[A-Za-z]{2,}/g) || []).map(t => t.toLowerCase());
 
+  // 中文国名 → 外文名称（外国数据英文页标题不含中文国名，需等价放行，否则被误过滤）
+  const REGION_EN = {
+    '美国': ['united states', 'u.s.a', 'u.s.', 'usa', 'american', 'america'],
+    '日本': ['japan', 'japanese'],
+    '德国': ['germany', 'german'],
+    '英国': ['united kingdom', 'britain', 'british', 'uk'],
+    '法国': ['france', 'french'],
+    '印度': ['india', 'indian'],
+    '韩国': ['south korea', 'korean', 'korea'],
+    '加拿大': ['canada', 'canadian'],
+    '巴西': ['brazil', 'brazilian'],
+    '俄罗斯': ['russia', 'russian'],
+    '澳大利亚': ['australia', 'australian'],
+    '意大利': ['italy', 'italian'],
+    '西班牙': ['spain', 'spanish'],
+    '墨西哥': ['mexico', 'mexican'],
+    '印尼': ['indonesia', 'indonesian'],
+    '荷兰': ['netherlands', 'dutch'],
+    '瑞士': ['switzerland', 'swiss'],
+    '沙特': ['saudi'],
+    '土耳其': ['turkey', 'turkish'],
+    '波兰': ['poland', 'polish'],
+    '瑞典': ['sweden', 'swedish'],
+    '比利时': ['belgium', 'belgian'],
+    '爱尔兰': ['ireland', 'irish'],
+    '以色列': ['israel', 'israeli'],
+    '阿根廷': ['argentina', 'argentinian'],
+    '泰国': ['thailand', 'thai'],
+    '越南': ['vietnam', 'vietnamese'],
+    '新加坡': ['singapore'],
+    '马来西亚': ['malaysia', 'malaysian'],
+    '菲律宾': ['philippines', 'filipino'],
+    '南非': ['south africa'],
+    '埃及': ['egypt', 'egyptian'],
+    '乌克兰': ['ukraine', 'ukrainian'],
+    '欧盟': ['european union', 'euro area', 'eurozone', 'eu '],
+    '新西兰': ['new zealand'],
+    '挪威': ['norway', 'norwegian'],
+    '丹麦': ['denmark', 'danish'],
+    '芬兰': ['finland', 'finnish'],
+    '奥地利': ['austria', 'austrian'],
+    '希腊': ['greece', 'greek'],
+    '葡萄牙': ['portugal', 'portuguese'],
+    '智利': ['chile', 'chilean'],
+    '哥伦比亚': ['colombia', 'colombian'],
+    '巴基斯坦': ['pakistan', 'pakistani'],
+    '孟加拉国': ['bangladesh'],
+    '阿联酋': ['united arab emirates', 'u.a.e', 'uae'],
+    '捷克': ['czech'],
+  };
+  const regionEnTokens = [];
+  for (const [zh, ens] of Object.entries(REGION_EN)) {
+    if (core.includes(zh)) regionEnTokens.push(...ens);
+  }
+
   const coverage = (hay) => {
     const h = normZh(hay);
     let hit = 0;
@@ -71,13 +126,25 @@ export function filterRelevant(results, entity) {
     return (hit + latinHit) / total;
   };
 
+  // 外文国名等价命中：含该国外文名 且 内容涉及经济指标（外文百科/网页标题不含中文国名，避免被误杀）
+  const regionEnMatch = (hayAll) => {
+    if (regionEnTokens.length === 0) return false;
+    const low = hayAll.toLowerCase();
+    const regionHit = regionEnTokens.some(tok => low.includes(tok));
+    const econHit = /gdp|domestic product|生产总值|经济|economy|trillion|美元|dollar/.test(hayAll);
+    return regionHit && econHit;
+  };
+
   return list.filter(r => {
     const title = normZh(r.title || '');
     const isBaike = /wikipedia|baike|wiki/i.test(`${r.source || ''} ${r.url || ''}`);
     if (title.includes(core)) return true;
-    if (isBaike) return false; // 百科标题不含核心词 → 仅顺带提及，剔除
     const hayAll = title + ' ' + normZh(r.snippet || '');
-    return hayAll.includes(core) || coverage(hayAll) >= 0.6;
+    // 外文百科（如 Economy of the United States）不含中文核心词，但含外文国名+经济指标 → 放行
+    if (regionEnMatch(hayAll)) return true;
+    if (isBaike) return false; // 百科标题不含核心词 → 仅顺带提及，剔除
+    if (hayAll.includes(core) || coverage(hayAll) >= 0.6) return true;
+    return false;
   });
 }
 

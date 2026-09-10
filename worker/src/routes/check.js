@@ -58,12 +58,28 @@ export async function handleCheck(request, env) {
 const RATING_CN = { high: '高', medium: '中', low: '低', info: '查询结果', unknown: '未知' };
 function ratingCn(r) { return RATING_CN[r] || r; }
 // 评级归一化为中文（兼容 LLM 偶尔输出英文/旧卡片英文值）
-function normRating(r) {
-  const s = String(r || '').trim().toLowerCase();
+function normRating(rating) {
+  const s = String(rating || '').trim().toLowerCase();
   if (['高', 'high', '属实', 'true'].includes(s)) return '高';
   if (['低', 'low', '不实', 'false'].includes(s)) return '低';
   if (['中', 'medium', '部分', 'partial'].includes(s)) return '中';
   return '中';
+}
+
+/**
+ * 从知识库卡片中挑出与断言相关的事实：
+ * 断言含属性词（体重/身高/出生…）时只保留同属性事实，避免无关事实（如幼崽体重）干扰评级；
+ * 挑不到则回退全量。
+ */
+function relatedKbFacts(facts, text) {
+  if (!Array.isArray(facts) || facts.length === 0) return facts || [];
+  const m = String(text || '').match(ATTR_RE);
+  const attr = m ? m[1] : '';
+  if (!attr) return facts;
+  const related = facts.filter(f =>
+    (f.label || '').includes(attr) || (f.value || '').includes(attr)
+  );
+  return related.length > 0 ? related : facts;
 }
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
@@ -313,8 +329,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       const kbPre = await queryEntry(env.FACT_KB, text, env.FACT_CACHE);
       if (kbPre?.hit && Array.isArray(kbPre.card?.facts) && kbPre.card.facts.length > 0) {
         const kbCard = kbPre.card;
-        const kbFactsText = kbCard.facts
-          .filter(f => f && (f.label || f.value))
+        const kbRelated = relatedKbFacts(kbCard.facts.filter(f => f && (f.label || f.value)), text);
+        const kbFactsText = kbRelated
           .map(f => `- ${f.label ? f.label + '：' : ''}${f.value || ''}`)
           .join('\n');
 
@@ -323,7 +339,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             '你是严谨的事实核查助手。用户给出一段需要验证的断言，并附带知识库中已核实的事实。',
             '请完成：',
             '1. 提取断言中的每个事实点；',
-            '2. 逐条对照知识库事实评级：高=与知识库事实一致；低=与知识库事实矛盾；中=知识库没有覆盖该事实点、无法判定；',
+            '2. 逐条对照知识库事实评级：高=与知识库事实一致；低=与知识库事实矛盾；中=知识库没有覆盖该事实点、无法判定。',
+            '   数值判定规则：成年/一般主体的指标常因野生/人工饲养等情形存在多个范围，只要断言数值落入任一权威来源所述的正常范围/区间内，即判"高"；仅当数值明确超出所有相关范围时才判"低"（注意区分幼崽/幼仔等特殊生长阶段的数据，不要拿来否定成年个体的断言）；知识库完全没有对应属性的数据时才判"中"。',
             '3. 与知识库矛盾时，在 correction 中用知识库事实给出正确说法；一致或无法判定时 correction 留空字符串。',
             '仅输出 JSON 数组，元素格式：{"claim":"事实点","entity":"主体","rating":"高|中|低","evidence":"对照的知识库事实","correction":"纠错或空字符串"}。不要输出任何其他内容。',
           ].join('\n') },
@@ -343,14 +360,13 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           // 所有事实点都能被知识库判定（高=一致 / 低=矛盾）才走快路径；
           // 只要有"中"（知识库覆盖不了）就降级到完整联网核查流程
           if (fastRatings.length > 0 && fastRatings.every(r => r.rating === '高' || r.rating === '低')) {
-            const kbResults = kbCard.facts
-              .filter(f => f && (f.label || f.value))
+            const kbResults = kbRelated
               .map(f => ({
                 title: `【知识库已核实】${f.source?.name || kbCard.title || ''}`,
                 url: f.source?.url || '',
                 snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
-                official_tag: !!f.source?.official_tag,
-                official_score: f.source?.official_tag ? 0.9 : (f.source?.official_score || 0.6),
+                official_tag: !!(f.source?.official_tag || f.source?.official),
+                official_score: (f.source?.official_tag || f.source?.official) ? 0.9 : (f.source?.official_score || 0.6),
                 site_name: f.source?.name || '知识库',
                 from_kb: true,
               }));
@@ -420,14 +436,17 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         try {
           const kb = await queryEntry(env.FACT_KB, entity2, env.FACT_CACHE);
           if (kb?.hit && Array.isArray(kb.card?.facts) && kb.card.facts.length > 0) {
-            const kbResults = kb.card.facts
-              .filter(f => f && (f.label || f.value))
+            const kbRelated = relatedKbFacts(
+              kb.card.facts.filter(f => f && (f.label || f.value)),
+              c.claim || ''
+            );
+            const kbResults = kbRelated
               .map(f => ({
                 title: `【知识库已核实】${f.source?.name || kb.card.title || entity2}`,
                 url: f.source?.url || '',
                 snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
-                official_tag: !!f.source?.official_tag,
-                official_score: f.source?.official_tag ? 0.9 : (f.source?.official_score || 0.6),
+                official_tag: !!(f.source?.official_tag || f.source?.official),
+                official_score: (f.source?.official_tag || f.source?.official) ? 0.9 : (f.source?.official_score || 0.6),
                 site_name: f.source?.name || '知识库',
                 from_kb: true,
               }));
@@ -513,6 +532,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
     ratings,
-    draftCard,
+    // 全部证据都来自知识库时不返回入库卡片（前端不再提示自动入库）
+    draftCard: allFromKb ? null : draftCard,
   };
 }

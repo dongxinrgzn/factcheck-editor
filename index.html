@@ -381,7 +381,7 @@ body {
       return;
     }
     box.innerHTML = results.map(function(r) {
-      var tagHtml = r.official_tag
+      var tagHtml = (r.official_tag || r.official)
         ? '<span class="tag-official">★官方</span>'
         : '<span class="tag-unofficial">待甄别</span>';
       var title = r.title || '(无标题)';
@@ -460,7 +460,7 @@ body {
       var card = data.card;
       var factsHtml = (card.facts || []).map(function(f) {
         var src = f.source || {};
-        var srcTag = src.official_tag ? '<span class="tag-official">★官方</span>' : '';
+        var srcTag = (src.official_tag || src.official) ? '<span class="tag-official">★官方</span>' : '';
         var staleBadge = isStale(f.verified_at) ? '<span class="stale-badge">待复核</span>' : '';
         return '<div class="kb-fact">' +
           '<span class="label">' + escapeHtml(f.label || '') + ':</span> ' +

@@ -23,7 +23,7 @@ export function ancientCacheKey(text) {
  * 生成知识库查询缓存 key
  */
 export function kbCacheKey(keyword) {
-  return 'kb:' + simpleHash(keyword || '');
+  return 'kbc:' + simpleHash(keyword || '');
 }
 
 /**

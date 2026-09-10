@@ -32,7 +32,7 @@ export async function handleKbQuery(request, env) {
   }
 
   // 查询词条卡
-  const { hit, card, cached, expired } = await queryEntry(env.FACT_KB, keyword);
+  const { hit, card, cached, expired } = await queryEntry(env.FACT_KB, keyword, env.FACT_CACHE);
 
   if (hit && card) {
     return jsonResponse({

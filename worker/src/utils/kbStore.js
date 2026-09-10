@@ -62,12 +62,14 @@ export function slugify(title) {
  * 查询词条卡（先查缓存 → 别名 → 主键）
  * @returns {Object} {hit, card}
  */
-export async function queryEntry(kv, keyword) {
+export async function queryEntry(kv, keyword, cacheKv = null) {
   if (!keyword) return { hit: false, card: null };
+  // 查询缓存写到独立缓存库（FACT_CACHE），避免与知识库词条主键混淆
+  const ck = cacheKv || kv;
 
   // 1. 查缓存
   const cacheK = kbCacheKey(keyword);
-  const cached = await cacheGet(kv, cacheK);
+  const cached = await cacheGet(ck, cacheK);
   if (cached) return { hit: true, card: cached, cached: true };
 
   // 2. 查别名索引（精确匹配）
@@ -79,11 +81,37 @@ export async function queryEntry(kv, keyword) {
   // 3. 查主键
   let raw = await kv.get(entryKey(slug));
 
-  // 4. 精确未命中 → 模糊匹配
+  // 4. 精确未命中 → 模糊匹配（标题/别名/事实内容，bigram 二元词重叠）
   if (!raw) {
     const kw = keyword.toLowerCase().trim();
-    // 提取关键词核心词（去掉常见连接词）
-    const kwChars = kw.replace(/[的年月日个各]/g, '');
+    // 去掉常见连接词/标点后的核心串
+    const kwChars = kw.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+    // 关键词中的长数字串（年份/数值，强信号）
+    const kwNums = kw.match(/\d{3,}/g) || [];
+    // 二元词集合
+    const toBigrams = (s) => {
+      const set = new Set();
+      for (let i = 0; i < s.length - 1; i++) set.add(s[i] + s[i + 1]);
+      return set;
+    };
+    const kwBigrams = toBigrams(kwChars);
+    // kw 二元词在目标中的覆盖率
+    const overlap = (target) => {
+      if (kwBigrams.size === 0) return 0;
+      const tb = toBigrams(target);
+      let hit = 0;
+      for (const b of kwBigrams) if (tb.has(b)) hit++;
+      return hit / kwBigrams.size;
+    };
+    // 目标（标题）二元词被 kw 覆盖的比例（短标题命中长查询时用）
+    const coverage = (target) => {
+      const tb = toBigrams(target);
+      if (tb.size === 0) return 0;
+      let hit = 0;
+      for (const b of tb) if (kwBigrams.has(b)) hit++;
+      return hit / tb.size;
+    };
+
     const list = await kv.list({ prefix: 'kb:', limit: 200 });
     const keys = list.keys || list || [];
     let bestMatch = null;
@@ -99,22 +127,38 @@ export async function queryEntry(kv, keyword) {
         const title = (card.title || '').toLowerCase();
         const aliases = (card.aliases || []).map(a => String(a).toLowerCase());
 
-        // 双向包含
+        // 双向包含（标题/别名）→ 直接命中
         if (title.includes(kw) || kw.includes(title) || aliases.some(a => a.includes(kw) || kw.includes(a))) {
           bestMatch = r;
+          bestScore = 1;
           break;
         }
 
-        // 核心词重叠匹配：去掉连接词后，统计共有字符数
-        const titleChars = title.replace(/[的年月日个各]/g, '');
-        let overlap = 0;
-        for (const ch of kwChars) {
-          if (titleChars.includes(ch)) overlap++;
+        // 标题/别名 bigram 匹配（kw 覆盖率 与 标题覆盖率 取大，阈值 0.6）
+        const titleChars = (title + ' ' + aliases.join(' ')).replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+        const tScore = Math.max(overlap(titleChars), coverage(titleChars));
+        if (tScore >= 0.6) {
+          if (tScore > bestScore) { bestScore = tScore; bestMatch = r; }
+          continue;
         }
-        const score = overlap / Math.max(kwChars.length, 1);
-        if (score > 0.6 && score > bestScore) {
-          bestScore = score;
-          bestMatch = r;
+
+        // 事实内容匹配（label+value+metric）
+        const content = (card.facts || [])
+          .map(f => `${f.label || ''} ${f.value || ''} ${f.metric || ''}`)
+          .join(' ')
+          .toLowerCase();
+        // 数字串精确命中（如查"1881年出生"命中含 1881 的卡片）→ 强信号
+        if (kwNums.length > 0 && kwNums.some(n => content.includes(n))) {
+          if (0.9 > bestScore) { bestScore = 0.9; bestMatch = r; }
+          continue;
+        }
+        // 内容 bigram 覆盖（阈值 0.5，要求 kw 核心串≥4字）
+        if (kwChars.length >= 4) {
+          const cScore = overlap(content.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, ''));
+          if (cScore >= 0.5 && cScore > bestScore) {
+            bestScore = cScore;
+            bestMatch = r;
+          }
         }
       } catch {}
     }
@@ -138,8 +182,8 @@ export async function queryEntry(kv, keyword) {
     }
   }
 
-  // 6. 写缓存
-  await cacheSet(kv, cacheK, card, KB_CACHE_TTL);
+  // 6. 写缓存（写到独立缓存库）
+  await cacheSet(ck, cacheK, card, KB_CACHE_TTL);
   return { hit: true, card };
 }
 

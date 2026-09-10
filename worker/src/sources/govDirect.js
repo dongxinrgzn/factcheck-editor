@@ -4,7 +4,16 @@
 // - 有结果：返回官方站点的真实文章（标题/摘要/链接），URL 为 gov.cn/edu.cn，自动打★官方
 // - 无结果：不返回任何内容（避免"点开空白/0结果"的无效入口）
 
-import { ddgSiteSearch } from './brave.js';
+import { ddgSiteSearch, bingSiteSearch, searxSiteSearch, ddgSearch, tavilySearch } from './brave.js';
+
+// 判断 URL 是否为政府/教育官方域名
+function isOfficialHost(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.endsWith('.gov.cn') || host === 'gov.cn' ||
+           host.endsWith('.edu.cn') || host === 'edu.cn';
+  } catch { return false; }
+}
 
 // 政府域名 → 站点中文名（用于结果来源标注）
 const DOMAIN_NAMES = [
@@ -47,32 +56,105 @@ const OFFICIAL_DOMAINS = [
 
 /**
  * 检索官方站点内与 query 相关的真实内容（仅返回确实查到内容的）
+ * 主通道：Tavily 正规搜索 API（对云服务器友好、返回正文），定向 gov.cn/edu.cn 官方域名
+ * 兜底：免费爬取（DDG 全网过滤 + SearXNG/Bing/DDG site:），云IP被限流时可能为空
  */
 export async function searchGovDirect(query, opts = {}) {
-  const { perDomain = 5 } = opts;
+  const { apiKey, perDomain = 8 } = opts;
   if (!query) return [];
 
-  const all = await Promise.all(
-    OFFICIAL_DOMAINS.map(async ({ domain }) => {
-      // 重试一次（DDG 对数据中心 IP 偶发限流返回空）
-      let hits = await ddgSiteSearch(domain, query, perDomain);
-      if (hits.length === 0) {
-        await new Promise(r => setTimeout(r, 1200));
-        hits = await ddgSiteSearch(domain, query, perDomain);
-      }
-      return hits;
-    })
-  );
+  let hits = [];
 
-  return all.flat()
-    .filter(h => h && h.url)
-    .map(h => ({
+  // 主通道：Tavily（稳定、含正文，能提取数据句）
+  if (apiKey) {
+    try {
+      const tv = await tavilySearch(query, {
+        apiKey, topK: 10,
+        includeDomains: ['gov.cn', 'edu.cn', 'stats.gov.cn'],
+      });
+      hits = tv.results
+        .filter(r => isOfficialHost(r.url))
+        .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
+    } catch { /* 走兜底 */ }
+  }
+
+  // 兜底通道：免费爬取（仅当 Tavily 无 key 或结果不足时）
+  if (hits.length < 3) {
+    let globalHits = [];
+    try {
+      const g = await ddgSearch(query, 18);
+      globalHits = g.filter(r => isOfficialHost(r.url))
+        .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
+    } catch { /* ignore */ }
+
+    let siteHits = [];
+    if (globalHits.length < 4) {
+      const per = await Promise.all(
+        OFFICIAL_DOMAINS.map(async ({ domain }) => {
+          const sx = await searxSiteSearch(domain, query, perDomain).catch(() => []);
+          if (sx.length >= 3) return sx;
+          const bing = await bingSiteSearch(domain, query, perDomain).catch(() => []);
+          let merged = mergeByUrl(sx, bing);
+          if (merged.length < 3) {
+            let ddg = await ddgSiteSearch(domain, query, perDomain).catch(() => []);
+            if (ddg.length === 0) {
+              await new Promise(r => setTimeout(r, 600));
+              ddg = await ddgSiteSearch(domain, query, perDomain).catch(() => []);
+            }
+            merged = mergeByUrl(merged, ddg);
+          }
+          return merged;
+        })
+      );
+      siteHits = per.flat()
+        .filter(h => h && h.url && isOfficialHost(h.url))
+        .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
+    }
+    hits = mergeByUrl(hits, mergeByUrl(globalHits, siteHits))
+      .filter(h => h && h.url && isOfficialHost(h.url));
+  }
+
+  // 权威站点加权排序：统计局/政府网/部委在前，edu.cn 在后
+  hits.sort((a, b) => govRank(a.url) - govRank(b.url));
+
+  // 按 URL 去重后返回
+  const seen = new Set();
+  const out = [];
+  for (const h of hits) {
+    const key = h.url.split('#')[0];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
       title: h.title,
       url: h.url,
       snippet: h.snippet || '来自官方网站的相关内容',
       source: 'gov-direct',
-      site_name: siteNameFromUrl(h.url),
-    }));
+      site_name: h.site_name || siteNameFromUrl(h.url),
+    });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+// 权威度排序：统计局/政府网/部委 gov.cn → 地方 gov.cn → edu.cn
+function govRank(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (/stats\.gov\.cn|www\.gov\.cn|sousuo\.gov\.cn/.test(host)) return 0;
+    if (/[a-z]+\.gov\.cn$/.test(host) || host === 'gov.cn') return 1; // 部委/省级
+    if (host.endsWith('.gov.cn')) return 2; // 地方政府
+    if (host.endsWith('.edu.cn')) return 3; // 高校
+    return 4;
+  } catch { return 5; }
+}
+
+function mergeByUrl(a, b) {
+  const seen = new Set((a || []).map(x => x.url));
+  const out = [...(a || [])];
+  for (const x of (b || [])) {
+    if (x && x.url && !seen.has(x.url)) { seen.add(x.url); out.push(x); }
+  }
+  return out;
 }
 
 /**

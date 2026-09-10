@@ -1,6 +1,7 @@
 // 官方性评分算法 + 白名单管理
 
 // 默认白名单（可被 env.OFFICIAL_WHITELIST 覆盖）
+// 注意：仅放真正的官方机构域名。百科类（维基/百度百科）权威但非"官方"，不在此列。
 const DEFAULT_WHITELIST = [
   'stats.gov.cn',
   'data.stats.gov.cn',
@@ -8,8 +9,8 @@ const DEFAULT_WHITELIST = [
   'moe.gov.cn',
   'gov.cn',
   'openstd.samr.gov.cn',
-  'baike.baidu.com',
-  'zh.wikipedia.org',
+  'ac.cn',
+  'edu.cn',
 ];
 
 /**
@@ -43,17 +44,25 @@ function extractDomain(url) {
 }
 
 /**
+ * 百科类域名判定：维基/百度百科等是权威参考，但不是政府官方
+ */
+function isEncyclopedia(domain) {
+  return /(^|\.)wikipedia\.org$|(^|\.)wikidata\.org$|baike\.baidu\.com|baike\.sogou\.com|(^|\.)mbalib\.com$|(^|\.)wiki/.test(domain);
+}
+
+/**
  * TLD 评分
- * .gov.cn/.edu.cn = 1.0
- * .org.cn/.org = 0.7
- * .com/.cn(非政府) = 0.3
+ * .gov.cn/.edu.cn/.ac.cn = 1.0（中国政府/教育/科研机构，官方）
+ * .gov/.edu = 0.9（境外政府/教育）
+ * .org.cn/.org = 0.45（非营利组织，参考性但非官方）
+ * 其余 = 0.3
  */
 function tldScore(domain) {
   if (!domain) return 0;
-  if (/(^|\.)gov\.cn$/.test(domain) || /(^|\.)edu\.cn$/.test(domain)) return 1.0;
+  if (/(^|\.)gov\.cn$/.test(domain) || /(^|\.)edu\.cn$/.test(domain) || /(^|\.)ac\.cn$/.test(domain)) return 1.0;
   if (/(^|\.)gov$/.test(domain) || /(^|\.)edu$/.test(domain)) return 0.9;
-  if (/(^|\.)org\.cn$/.test(domain) || /(^|\.)org$/.test(domain)) return 0.7;
-  if (/(^|\.)ac\.cn$/.test(domain)) return 0.8;
+  if (/(^|\.)org\.cn$/.test(domain)) return 0.55;
+  if (/(^|\.)org$/.test(domain)) return 0.45;
   return 0.3;
 }
 
@@ -99,10 +108,15 @@ export function officialScore(url, content = '', env = null) {
   const domain = extractDomain(url);
   const whitelist = getWhitelist(env);
   let score = 0;
-  score += tldScore(domain);
-  score += whitelistBonus(domain, whitelist);
-  score += primarySourceBonus(content);
-  score += penaltyScore(domain, content);
+  if (isEncyclopedia(domain)) {
+    // 百科：权威参考来源，但不是政府官方——给中等可信分，不打官方标签
+    score = 0.5;
+  } else {
+    score += tldScore(domain);
+    score += whitelistBonus(domain, whitelist);
+    score += primarySourceBonus(content);
+    score += penaltyScore(domain, content);
+  }
   // 封顶 [0, 1]
   score = Math.max(0, Math.min(1, score));
   return { score: Number(score.toFixed(2)), tag: score >= 0.7 };

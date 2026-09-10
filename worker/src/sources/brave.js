@@ -12,6 +12,77 @@ function stripHtml(s) {
   return String(s || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
 }
 
+// 繁→简常用字映射（仅用于实体相关性比对，避免"大熊猫"匹配不到"大熊貓"）
+const TRAD2SIMP = {
+  '貓': '猫', '體': '体', '長': '长', '壽': '寿', '齡': '龄', '積': '积', '產': '产',
+  '萬': '万', '億': '亿', '隻': '只', '國': '国', '學': '学', '東': '东', '業': '业',
+  '發': '发', '標': '标', '準': '准', '種': '种', '頭': '头', '條': '条', '隻': '只',
+  '龍': '龙', '鳥': '鸟', '魚': '鱼', '馬': '马', '蟲': '虫', '貝': '贝', '見': '见',
+};
+function normZh(s) {
+  return String(s || '').replace(/[貓體長壽齡積產萬億隻國學東業發標準種頭條龍鳥魚馬蟲貝見]/g, c => TRAD2SIMP[c] || c);
+}
+
+// 从检索串中剔除属性维度词（体重/身高/体长…含繁体变体），只留实体词。
+// 维基全文检索 / 相关性过滤都要用纯实体词，避免属性词干扰。
+export function entityTermOf(query) {
+  let q = String(query || '');
+  for (const variants of Object.values(HINT_VARIANTS)) {
+    for (const v of variants) q = q.split(v).join(' ');
+  }
+  q = q.replace(/[?？?多少几什么的是有在和与\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return q || query;
+}
+
+/**
+ * 相关性过滤：结果必须与查询实体相关
+ * - 去掉数字/年份得到核心词（"2025年国内生产总值"→"国内生产总值"）
+ * - 百科类（维基/百科）：标题必须含核心词（否则只是正文顺带提及，如"犬"文中提到大熊猫 → 剔除）
+ * - 其它来源（官方站/网页）：标题或正文含核心词，或核心词二元组覆盖率≥60%（容忍措辞/年份差异）
+ */
+export function filterRelevant(results, entity) {
+  const list = Array.isArray(results) ? results : [];
+  const raw = normZh(entity || '').trim();
+  if (!raw || raw.length < 2) return list;
+  // 去掉数字、年份、百分号、常见时间字，得到用于匹配的核心词
+  const core = raw
+    .replace(/\d+(\.\d+)?[%％]?/g, '')
+    .replace(/[年月份日世纪号]/g, '')
+    .replace(/[\s?？?，,。.、：:；;（）()【】\[\]"'"']/g, '')
+    .trim();
+  if (core.length < 2) return list;
+
+  // 中文二元组 + 拉丁单词
+  const bigrams = [];
+  for (let i = 0; i < core.length - 1; i++) {
+    const bg = core.slice(i, i + 2);
+    if (/[\u4e00-\u9fa5]{2}/.test(bg)) bigrams.push(bg);
+  }
+  const latinTokens = (core.match(/[A-Za-z]{2,}/g) || []).map(t => t.toLowerCase());
+
+  const coverage = (hay) => {
+    const h = normZh(hay);
+    let hit = 0;
+    for (const bg of bigrams) if (h.includes(bg)) hit++;
+    let latinHit = 0;
+    for (const t of latinTokens) if (h.toLowerCase().includes(t)) latinHit++;
+    const total = bigrams.length + latinTokens.length;
+    if (total === 0) return 0;
+    return (hit + latinHit) / total;
+  };
+
+  return list.filter(r => {
+    const title = normZh(r.title || '');
+    const isBaike = /wikipedia|baike|wiki/i.test(`${r.source || ''} ${r.url || ''}`);
+    if (title.includes(core)) return true;
+    if (isBaike) return false; // 百科标题不含核心词 → 仅顺带提及，剔除
+    const hayAll = title + ' ' + normZh(r.snippet || '');
+    return hayAll.includes(core) || coverage(hayAll) >= 0.6;
+  });
+}
+
+
+
 // ---------- 维基百科 ----------
 // 取词条导言（纯文本开头，含生卒年/定义等关键事实）
 async function wikiExtract(lang, title) {
@@ -177,9 +248,12 @@ async function wikiEnSupplement(zhTitle, hint) {
 
 async function wikiSearch(query, topK = 5, hint = '') {
   const out = [];
+  // 维基全文检索只按实体词搜；属性词（体重/身高）仅用于 hint 数据抽取，
+  // 避免按属性词召回所有含体型数据的无关词条（犬/郊狼/柳江人…）
+  const term = entityTermOf(query);
   for (const lang of ['zh', 'en']) {
     try {
-      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=${topK}&format=json&formatversion=2`;
+      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(term)}&srlimit=${topK}&format=json&formatversion=2`;
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 8000);
       const resp = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'FactCheckEditor/1.0' } });
@@ -226,7 +300,7 @@ async function wikiSearch(query, topK = 5, hint = '') {
 }
 
 // ---------- DuckDuckGo HTML ----------
-async function ddgSearch(query, topK = 5) {
+export async function ddgSearch(query, topK = 5) {
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     const ctrl = new AbortController();
@@ -319,6 +393,65 @@ export async function ddgSiteSearch(domain, query, topK = 3) {
   }
 }
 
+// ---------- Bing site: 搜索（DDG 限流时的独立兜底通道） ----------
+function decodeBingUrl(href) {
+  // Bing 跳转链接 /ck/a?...&u=a1<base64>，去掉 a1 前缀后 base64 解码
+  const m = href.match(/[?&]u=a1([A-Za-z0-9+/=_-]+)/);
+  if (m) {
+    try {
+      let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const dec = atob(b64);
+      if (/^https?:\/\//.test(dec)) return dec;
+    } catch { /* fall through */ }
+  }
+  return href;
+}
+
+export async function bingSiteSearch(domain, query, topK = 5) {
+  try {
+    const q = `site:${domain} ${query}`;
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=zh-CN&count=20`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 9000);
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+    });
+    clearTimeout(t);
+    if (!resp.ok) return [];
+    const html = await resp.text();
+
+    // 每个结果块 <li class="b_algo"> ... <h2><a href="...">title</a></h2> ... <p ...>snippet</p>
+    const blocks = html.split(/<li class="b_algo"/).slice(1);
+    const out = [];
+    for (const blk of blocks) {
+      const linkM = blk.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      if (!linkM) continue;
+      const realUrl = decodeBingUrl(linkM[1]);
+      let host = '';
+      try { host = new URL(realUrl).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
+      if (host !== domain && !host.endsWith('.' + domain)) continue;
+      // 摘要：b_caption 内的 <p>
+      let snippet = '';
+      const capM = blk.match(/<div class="b_caption"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
+      if (capM) snippet = stripHtml(capM[1]);
+      if (!snippet) {
+        const pM = blk.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+        if (pM) snippet = stripHtml(pM[1]);
+      }
+      out.push({ title: stripHtml(linkM[2]), url: realUrl, snippet });
+      if (out.length >= topK) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // ---------- SearXNG（末选） ----------
 async function searxSearch(query, topK = 5) {
   for (const instance of SEARX_INSTANCES) {
@@ -339,6 +472,81 @@ async function searxSearch(query, topK = 5) {
     } catch { /* 下一个实例 */ }
   }
   return [];
+}
+
+// ---------- Tavily 正规搜索 API（对云服务器友好，返回网页正文） ----------
+/**
+ * @param {string} query
+ * @param {Object} opts - { apiKey, topK, includeDomains:[], searchDepth }
+ * @returns {{results: Array, answer: string}}
+ */
+export async function tavilySearch(query, opts = {}) {
+  const { apiKey, topK = 8, includeDomains = null, searchDepth = 'advanced' } = opts;
+  if (!apiKey || !query) return { results: [], answer: '' };
+  try {
+    const payload = { query, search_depth: searchDepth, include_answer: true, max_results: topK };
+    if (includeDomains && includeDomains.length) payload.include_domains = includeDomains;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20000);
+    const resp = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify(payload),
+    });
+    clearTimeout(t);
+    if (!resp.ok) return { results: [], answer: '' };
+    const j = await resp.json().catch(() => null);
+    if (!j || !Array.isArray(j.results)) return { results: [], answer: '' };
+    const results = j.results
+      .filter(r => r && r.url)
+      .map(r => ({
+        title: r.title || '',
+        url: r.url,
+        snippet: r.content || '',
+        source: 'tavily',
+      }));
+    return { results, answer: j.answer || '' };
+  } catch {
+    return { results: [], answer: '' };
+  }
+}
+
+// ---------- SearXNG site: 官方域名检索（聚合多实例，JSON 稳定，官方主通道） ----------
+export async function searxSiteSearch(domain, query, topK = 6) {
+  const q = `site:${domain} ${query}`;
+  const pooled = [];
+  for (const instance of SEARX_INSTANCES) {
+    try {
+      const params = new URLSearchParams({ q, format: 'json', language: 'zh' });
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 7000);
+      const resp = await fetch(`${instance}/search?${params}`, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+      clearTimeout(t);
+      if (!resp.ok) continue;
+      const j = await resp.json().catch(() => null);
+      const raw = j?.results;
+      if (!Array.isArray(raw)) continue;
+      for (const r of raw) {
+        const url = r.url || '';
+        let host = '';
+        try { host = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
+        if (host !== domain && !host.endsWith('.' + domain)) continue;
+        pooled.push({ title: r.title || '', url, snippet: r.content || '', source: 'searx' });
+      }
+      if (pooled.length >= topK) break; // 该实例已够用，不再试下一个
+    } catch { /* 下一个实例 */ }
+  }
+  // 去重
+  const seen = new Set();
+  const out = [];
+  for (const r of pooled) {
+    if (seen.has(r.url)) continue;
+    seen.add(r.url);
+    out.push(r);
+    if (out.length >= topK) break;
+  }
+  return out;
 }
 
 /**

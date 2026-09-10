@@ -9,7 +9,7 @@ import { braveSearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { submitDraft } from '../utils/kbStore.js';
+import { submitDraft, queryEntry } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
@@ -57,6 +57,14 @@ export async function handleCheck(request, env) {
  */
 const RATING_CN = { high: '高', medium: '中', low: '低', info: '查询结果', unknown: '未知' };
 function ratingCn(r) { return RATING_CN[r] || r; }
+// 评级归一化为中文（兼容 LLM 偶尔输出英文/旧卡片英文值）
+function normRating(r) {
+  const s = String(r || '').trim().toLowerCase();
+  if (['高', 'high', '属实', 'true'].includes(s)) return '高';
+  if (['低', 'low', '不实', 'false'].includes(s)) return '低';
+  if (['中', 'medium', '部分', 'partial'].includes(s)) return '中';
+  return '中';
+}
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
 const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
@@ -311,12 +319,50 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
 
-  // 2. 对每条断言检索证据
+  // 2. 对每条断言检索证据：先查知识库（已核实事实直接用），未命中再联网
   const checkSearches = await Promise.all(
     claims.slice(0, 5).map(async (c) => {
       const attrM2 = (c.claim || '').match(ATTR_RE);
       const hint2 = attrM2 ? attrM2[1] : '';
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
+
+      // 2a. 知识库快路径：实体已入库 → 直接用已核实事实作为证据，不再联网
+      if (entity2) {
+        try {
+          const kb = await queryEntry(env.FACT_KB, entity2, env.FACT_CACHE);
+          if (kb?.hit && Array.isArray(kb.card?.facts) && kb.card.facts.length > 0) {
+            const kbResults = kb.card.facts
+              .filter(f => f && (f.label || f.value))
+              .map(f => ({
+                title: `【知识库已核实】${f.source?.name || kb.card.title || entity2}`,
+                url: f.source?.url || '',
+                snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
+                official_tag: !!f.source?.official_tag,
+                official_score: f.source?.official_tag ? 0.9 : (f.source?.official_score || 0.6),
+                site_name: f.source?.name || '知识库',
+                from_kb: true,
+              }));
+            // 补充卡片参考来源链接
+            for (const ref of (kb.card.references || []).slice(0, 3)) {
+              if (ref.url && !kbResults.some(r => r.url === ref.url)) {
+                kbResults.push({
+                  title: ref.name || '参考来源',
+                  url: ref.url,
+                  snippet: '',
+                  official_tag: !!ref.official_tag,
+                  official_score: ref.official_tag ? 0.9 : 0.5,
+                  from_kb: true,
+                });
+              }
+            }
+            if (kbResults.length > 0) {
+              return { claim: c, results: kbResults, cached: true, fromKb: true };
+            }
+          }
+        } catch { /* 知识库查询失败则走联网 */ }
+      }
+
+      // 2b. 联网检索（知识库未命中）
       const sq = entity2 ? (hint2 ? `${entity2} ${hint2}` : entity2) : c.claim;
       const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
@@ -337,7 +383,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   const ratings = await Promise.all(
     checkSearches.map(async (sr) => {
       if (!sr.results || sr.results.length === 0) {
-        return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实' };
+        return { claim: sr.claim, rating: '低', evidence: '未找到相关证据', correction: '建议人工核实' };
       }
       try {
         const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
@@ -348,37 +394,36 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           temperature: 0.1,
           maxTokens: 1024,
         });
-        return { claim: sr.claim, ...r, sources: sr.results };
+        return { claim: sr.claim, ...r, rating: normRating(r.rating), sources: sr.results };
       } catch (e) {
-        return { claim: sr.claim, rating: 'medium', evidence: '评级失败', correction: e.message };
+        return { claim: sr.claim, rating: '中', evidence: '评级失败', correction: e.message };
       }
     })
   );
 
-  // 4. 知识库草稿
+  // 4. 知识库草稿（全部证据都来自知识库时不再重复提交待审）
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
-  if (autoDraft && draftCard && draftCard.facts.length > 0) {
+  const allFromKb = checkSearches.every(s => s.fromKb);
+  if (autoDraft && draftCard && draftCard.facts.length > 0 && !allFromKb) {
     try { await submitDraft(env.FACT_KB, draftCard); } catch {}
   }
 
-  const overall = ratings.every(r => r.rating === 'high')
+  const overall = ratings.every(r => r.rating === '高')
     ? '高'
-    : ratings.some(r => r.rating === 'low')
+    : ratings.some(r => r.rating === '低')
     ? '低'
     : '中';
-
-  // 评级转中文
-  const ratingsCn = ratings.map(r => ({ ...r, rating: ratingCn(r.rating) }));
 
   return {
     intent: 'verify',
     claims,
     searches: checkSearches,
     rating: overall,
+    kb_hit: checkSearches.some(s => s.fromKb),
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
-    ratings: ratingsCn,
+    ratings,
     draftCard,
   };
 }

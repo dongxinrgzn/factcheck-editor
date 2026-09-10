@@ -49,7 +49,7 @@ export async function handleSearch(request, env) {
     const whitelist = env.OFFICIAL_WHITELIST
       ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
       : ['gov.cn', 'org.cn'];
-    const govResults = await searchGovDirect(query);
+    const govResults = await searchGovDirect(query, { apiKey: env.TAVILY_KEY });
     try {
       const searxResults = await braveSearch({
         query, preferOfficial: true, topK: top_k, whitelist,

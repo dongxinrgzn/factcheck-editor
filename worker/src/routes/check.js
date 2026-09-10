@@ -306,6 +306,95 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   }
 
   // ---------- 分支 B：断言模式 → 事实核查 ----------
+  // 0. 快路径：先用原文直接查知识库（标题/别名/事实内容模糊匹配）。
+  //    命中则只调用一次 LLM 同时完成"提取断言 + 对照知识库评级"，不联网、不提待审。
+  if (intent === 'assertion') {
+    try {
+      const kbPre = await queryEntry(env.FACT_KB, text, env.FACT_CACHE);
+      if (kbPre?.hit && Array.isArray(kbPre.card?.facts) && kbPre.card.facts.length > 0) {
+        const kbCard = kbPre.card;
+        const kbFactsText = kbCard.facts
+          .filter(f => f && (f.label || f.value))
+          .map(f => `- ${f.label ? f.label + '：' : ''}${f.value || ''}`)
+          .join('\n');
+
+        const fastMsgs = [
+          { role: 'system', content: [
+            '你是严谨的事实核查助手。用户给出一段需要验证的断言，并附带知识库中已核实的事实。',
+            '请完成：',
+            '1. 提取断言中的每个事实点；',
+            '2. 逐条对照知识库事实评级：高=与知识库事实一致；低=与知识库事实矛盾；中=知识库没有覆盖该事实点、无法判定；',
+            '3. 与知识库矛盾时，在 correction 中用知识库事实给出正确说法；一致或无法判定时 correction 留空字符串。',
+            '仅输出 JSON 数组，元素格式：{"claim":"事实点","entity":"主体","rating":"高|中|低","evidence":"对照的知识库事实","correction":"纠错或空字符串"}。不要输出任何其他内容。',
+          ].join('\n') },
+          { role: 'user', content: `待验证断言：${text}\n\n知识库已核实事实（词条：${kbCard.title}）：\n${kbFactsText}` },
+        ];
+        const fastRaw = await callLLMJson({ messages: fastMsgs, apiKey, temperature: 0.1, maxTokens: 1024 });
+        if (Array.isArray(fastRaw) && fastRaw.length > 0) {
+          const fastRatings = fastRaw
+            .filter(r => r && r.claim)
+            .map(r => ({
+              claim: r.claim,
+              entity: r.entity || kbCard.title || '',
+              rating: normRating(r.rating),
+              evidence: r.evidence || '',
+              correction: r.correction || '',
+            }));
+          // 所有事实点都能被知识库判定（高=一致 / 低=矛盾）才走快路径；
+          // 只要有"中"（知识库覆盖不了）就降级到完整联网核查流程
+          if (fastRatings.length > 0 && fastRatings.every(r => r.rating === '高' || r.rating === '低')) {
+            const kbResults = kbCard.facts
+              .filter(f => f && (f.label || f.value))
+              .map(f => ({
+                title: `【知识库已核实】${f.source?.name || kbCard.title || ''}`,
+                url: f.source?.url || '',
+                snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
+                official_tag: !!f.source?.official_tag,
+                official_score: f.source?.official_tag ? 0.9 : (f.source?.official_score || 0.6),
+                site_name: f.source?.name || '知识库',
+                from_kb: true,
+              }));
+            for (const ref of (kbCard.references || []).slice(0, 3)) {
+              if (ref.url && !kbResults.some(r => r.url === ref.url)) {
+                kbResults.push({
+                  title: ref.name || '参考来源',
+                  url: ref.url,
+                  snippet: '',
+                  official_tag: !!ref.official_tag,
+                  official_score: ref.official_tag ? 0.9 : 0.5,
+                  from_kb: true,
+                });
+              }
+            }
+            const claimsOut = fastRatings.map(r => ({ claim: r.claim, entity: r.entity }));
+            const ratingsOut = fastRatings.map(r => ({
+              claim: { claim: r.claim, entity: r.entity },
+              rating: r.rating,
+              evidence: r.evidence,
+              correction: r.correction,
+              sources: kbResults,
+            }));
+            const overall = ratingsOut.every(r => r.rating === '高')
+              ? '高'
+              : ratingsOut.some(r => r.rating === '低') ? '低' : '中';
+            return {
+              intent: 'verify',
+              claims: claimsOut,
+              searches: [{ claim: { claim: text, entity: kbCard.title }, results: kbResults, cached: true, fromKb: true }],
+              rating: overall,
+              kb_hit: true,
+              corrections: ratingsOut.filter(r => r.correction).map(r => ({
+                claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
+              })),
+              ratings: ratingsOut,
+              draftCard: null,
+            };
+          }
+        }
+      }
+    } catch { /* 快路径异常或知识库覆盖不足 → 降级到完整核查流程 */ }
+  }
+
   // 1. LLM 提取事实断言
   const extractMsgs = buildExtractFactsMessages(text, context);
   const claims = await callLLMJson({

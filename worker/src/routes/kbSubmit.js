@@ -43,7 +43,16 @@ export async function handleKbSubmit(request, env) {
   if (action === 'approve') {
     const { slug, card: approveCard, timestamp } = body;
     if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
-    const result = await approveEntry(env.FACT_KB, slug, approveCard || card, isAdmin ? 'admin' : 'curator');
+    let incomingCard = approveCard;
+    // 未直接带卡片时，从待审队列读取草稿
+    if (!incomingCard && timestamp) {
+      try {
+        const pendingRaw = await env.FACT_KB.get(`kb:pending:${timestamp}:${slug}`);
+        if (pendingRaw) incomingCard = JSON.parse(pendingRaw);
+      } catch {}
+    }
+    if (!incomingCard) return errorJson('待审词条不存在或缺少卡片内容', 404, 'NOT_FOUND', request);
+    const result = await approveEntry(env.FACT_KB, slug, incomingCard, isAdmin ? 'admin' : 'curator');
     if (timestamp) await clearPending(env.FACT_KB, timestamp, slug);
     return jsonResponse({ ok: true, data: result }, 200, request);
   }

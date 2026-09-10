@@ -191,7 +191,8 @@ export async function queryEntry(kv, keyword, cacheKv = null) {
  * 获取词条详情（按 slug 或 key）
  */
 export async function getEntry(kv, key) {
-  const raw = await kv.get(entryKey(key)) || await kv.get(`kb:${key}`);
+  const k = String(key || '').replace(/^kb:/, '');
+  const raw = await kv.get(entryKey(k)) || await kv.get(`kb:${key}`);
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -342,7 +343,7 @@ export async function listVerified(kv, limit = 100, cursor = null) {
       const card = JSON.parse(raw);
       if (card.status === 'verified' || card.status === 'auto_verified') {
         items.push({
-          id: card.id,
+          id: card.id || item.name.replace(/^kb:/, ''),
           title: card.title,
           category: card.category || 'auto',
           status: card.status,
@@ -377,7 +378,7 @@ export async function searchEntries(kv, keyword, limit = 20) {
       const aliases = (card.aliases || []).map(a => String(a).toLowerCase());
       if (title.includes(kw) || aliases.some(a => a.includes(kw))) {
         items.push({
-          id: card.id,
+          id: card.id || item.name.replace(/^kb:/, ''),
           title: card.title,
           category: card.category || 'auto',
           status: card.status,
@@ -393,7 +394,9 @@ export async function searchEntries(kv, keyword, limit = 20) {
 /**
  * 删除词条（主键 + 别名 + 分类索引 + 待审标记）
  */
-export async function deleteEntry(kv, slug) {
+export async function deleteEntry(kv, slugRaw) {
+  // 容错：兼容传入完整主键（kb:xxx）或裸 slug
+  const slug = String(slugRaw || '').replace(/^kb:/, '');
   // 读取卡片获取别名和分类
   const raw = await kv.get(entryKey(slug));
   if (raw) {
@@ -474,7 +477,7 @@ export async function listStale(kv, days = 180, limit = 100) {
       const card = JSON.parse(raw);
       const verifiedAt = card.facts?.[0]?.verified_at || card.updated_at;
       if (verifiedAt && new Date(verifiedAt).getTime() < threshold) {
-        stale.push({ id: card.id, title: card.title, updated_at: card.updated_at });
+        stale.push({ id: card.id || item.name.replace(/^kb:/, ''), title: card.title, updated_at: card.updated_at });
       }
     } catch {}
   }

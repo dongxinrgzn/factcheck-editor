@@ -322,11 +322,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   }
 
   // ---------- 分支 B：断言模式 → 事实核查 ----------
-  // 0. 快路径：先用原文直接查知识库（标题/别名/事实内容模糊匹配）。
+  // 0. 快路径：先用原文直接查知识库（仅标题/别名实体匹配，避免句中数字误命中）。
   //    命中则只调用一次 LLM 同时完成"提取断言 + 对照知识库评级"，不联网、不提待审。
   if (intent === 'assertion') {
     try {
-      const kbPre = await queryEntry(env.FACT_KB, text, env.FACT_CACHE);
+      const kbPre = await queryEntry(env.FACT_KB, text, env.FACT_CACHE, { entityOnly: true });
       if (kbPre?.hit && Array.isArray(kbPre.card?.facts) && kbPre.card.facts.length > 0) {
         const kbCard = kbPre.card;
         const kbRelated = relatedKbFacts(kbCard.facts.filter(f => f && (f.label || f.value)), text);

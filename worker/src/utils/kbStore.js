@@ -62,13 +62,16 @@ export function slugify(title) {
  * 查询词条卡（先查缓存 → 别名 → 主键）
  * @returns {Object} {hit, card}
  */
-export async function queryEntry(kv, keyword, cacheKv = null) {
+export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
   if (!keyword) return { hit: false, card: null };
+  // entityOnly：只按标题/别名匹配（验证快路径用整句查询时开启，
+  // 避免句中数字/属性词误命中事实内容中含相同数字的其他词条）
+  const { entityOnly = false } = opts;
   // 查询缓存写到独立缓存库（FACT_CACHE），避免与知识库词条主键混淆
   const ck = cacheKv || kv;
 
-  // 1. 查缓存
-  const cacheK = kbCacheKey(keyword);
+  // 1. 查缓存（严格/宽松模式分开缓存，避免互相污染）
+  const cacheK = kbCacheKey(keyword) + (entityOnly ? ':e' : '');
   const cached = await cacheGet(ck, cacheK);
   if (cached) return { hit: true, card: cached, cached: true };
 
@@ -142,14 +145,34 @@ export async function queryEntry(kv, keyword, cacheKv = null) {
           continue;
         }
 
+        // entityOnly 模式（验证整句）：只认标题/别名，不做事实内容/数字匹配
+        if (entityOnly) continue;
+
         // 事实内容匹配（label+value+metric）
         const content = (card.facts || [])
           .map(f => `${f.label || ''} ${f.value || ''} ${f.metric || ''}`)
           .join(' ')
           .toLowerCase();
-        // 数字串精确命中（如查"1881年出生"命中含 1881 的卡片）→ 强信号
+        // 数字串命中（如查"鲁迅 1881"命中含 1881 的鲁迅卡）→ 强信号。
+        // 但纯数字不能独立命中：去掉数字和出生/年份等通用词后，剩余的中文实体词
+        // 必须与标题/别名或事实内容有二元词重叠，否则"老舍1988"会误命中含1988纠错事实的鲁迅卡。
         if (kwNums.length > 0 && kwNums.some(n => content.includes(n))) {
-          if (0.9 > bestScore) { bestScore = 0.9; bestMatch = r; }
+          const kwEntity = kw
+            .replace(/\d+/g, '')
+            .replace(/出生|生於|生于|卒於|卒于|逝世|去世|年份|的人|作家|先生/g, '')
+            .replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+          let entityOverlap = false;
+          if (kwEntity.length >= 2) {
+            const eBg = toBigrams(kwEntity);
+            const contentChars = content.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
+            entityOverlap = [titleChars, contentChars].some(t => {
+              const tb = toBigrams(t);
+              let hit = 0;
+              for (const b of eBg) if (tb.has(b)) hit++;
+              return hit / eBg.size >= 0.5;
+            });
+          }
+          if (entityOverlap && 0.9 > bestScore) { bestScore = 0.9; bestMatch = r; }
           continue;
         }
         // 内容 bigram 覆盖（阈值 0.5，要求 kw 核心串≥4字）

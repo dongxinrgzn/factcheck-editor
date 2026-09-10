@@ -59,83 +59,15 @@ export function slugify(title) {
 }
 
 /**
- * 国别/地区限定词表：[规范名, 同义词...]
- * 用于防止"美国GDP"误命中"国内（中国）生产总值"这类地区冲突。
- */
-const REGION_WORDS = [
-  ['中国', ['中国', '国内', '我国', '全国', '中方', '中华', '大陆']],
-  ['美国', ['美国', '美方', '全美']],
-  ['日本', ['日本', '日方']],
-  ['德国', ['德国', '德方']],
-  ['法国', ['法国', '法方']],
-  ['英国', ['英国', '英方']],
-  ['俄罗斯', ['俄罗斯', '俄方', '俄国']],
-  ['印度', ['印度']],
-  ['巴西', ['巴西']],
-  ['韩国', ['韩国', '韩方']],
-  ['朝鲜', ['朝鲜']],
-  ['加拿大', ['加拿大']],
-  ['澳大利亚', ['澳大利亚', '澳洲']],
-  ['意大利', ['意大利']],
-  ['西班牙', ['西班牙']],
-  ['欧盟', ['欧盟', '欧元区']],
-  ['新加坡', ['新加坡']],
-  ['泰国', ['泰国']],
-  ['越南', ['越南']],
-  ['印尼', ['印尼', '印度尼西亚']],
-  ['马来西亚', ['马来西亚']],
-  ['菲律宾', ['菲律宾']],
-  ['墨西哥', ['墨西哥']],
-  ['南非', ['南非']],
-  ['埃及', ['埃及']],
-  ['土耳其', ['土耳其']],
-  ['乌克兰', ['乌克兰']],
-  ['波兰', ['波兰']],
-  ['荷兰', ['荷兰']],
-  ['瑞士', ['瑞士']],
-  ['瑞典', ['瑞典']],
-  ['阿根廷', ['阿根廷']],
-  ['沙特', ['沙特']],
-  ['伊朗', ['伊朗']],
-  ['巴基斯坦', ['巴基斯坦']],
-  ['孟加拉国', ['孟加拉国', '孟加拉']],
-  ['香港', ['香港']],
-  ['台湾', ['台湾', '臺灣']],
-  ['澳门', ['澳门', '澳門']],
-];
-
-function regionsOf(text, isQuery = false) {
-  const hits = new Set();
-  if (!text) return hits;
-  let s = text;
-  if (isQuery) {
-    // 查询中"国内生产总值"是 GDP 固定术语（日本国内生产总值=日本GDP），
-    // 其中的"国内"不指中国，识别地区前先剔除该术语
-    s = s.replace(/国内生[产產][总總]值/g, '');
-  }
-  for (const [canon, words] of REGION_WORDS) {
-    for (const w of words) {
-      if (s.includes(w)) { hits.add(canon); break; }
-    }
-  }
-  return hits;
-}
-
-/**
  * 查询词条卡（先查缓存 → 别名 → 主键）
  * @returns {Object} {hit, card}
  */
-export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
+export async function queryEntry(kv, keyword) {
   if (!keyword) return { hit: false, card: null };
-  // entityOnly：只按标题/别名匹配（验证快路径用整句查询时开启，
-  // 避免句中数字/属性词误命中事实内容中含相同数字的其他词条）
-  const { entityOnly = false } = opts;
-  // 查询缓存写到独立缓存库（FACT_CACHE），避免与知识库词条主键混淆
-  const ck = cacheKv || kv;
 
-  // 1. 查缓存（严格/宽松模式分开缓存，避免互相污染）
-  const cacheK = kbCacheKey(keyword) + (entityOnly ? ':e' : '');
-  const cached = await cacheGet(ck, cacheK);
+  // 1. 查缓存
+  const cacheK = kbCacheKey(keyword);
+  const cached = await cacheGet(kv, cacheK);
   if (cached) return { hit: true, card: cached, cached: true };
 
   // 2. 查别名索引（精确匹配）
@@ -147,40 +79,11 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
   // 3. 查主键
   let raw = await kv.get(entryKey(slug));
 
-  // 4. 精确未命中 → 模糊匹配（标题/别名/事实内容，bigram 二元词重叠）
+  // 4. 精确未命中 → 模糊匹配
   if (!raw) {
     const kw = keyword.toLowerCase().trim();
-    // 去掉常见连接词/标点后的核心串
-    const kwChars = kw.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
-    // 关键词中的长数字串（年份/数值，强信号）
-    const kwNums = kw.match(/\d{3,}/g) || [];
-    // 二元词集合
-    const toBigrams = (s) => {
-      const set = new Set();
-      for (let i = 0; i < s.length - 1; i++) set.add(s[i] + s[i + 1]);
-      return set;
-    };
-    const kwBigrams = toBigrams(kwChars);
-    // kw 二元词在目标中的覆盖率
-    const overlap = (target) => {
-      if (kwBigrams.size === 0) return 0;
-      const tb = toBigrams(target);
-      let hit = 0;
-      for (const b of kwBigrams) if (tb.has(b)) hit++;
-      return hit / kwBigrams.size;
-    };
-    // 目标（标题）二元词被 kw 覆盖的比例（短标题命中长查询时用）
-    const coverage = (target) => {
-      const tb = toBigrams(target);
-      if (tb.size === 0) return 0;
-      let hit = 0;
-      for (const b of tb) if (kwBigrams.has(b)) hit++;
-      return hit / tb.size;
-    };
-
-    // 查询中的国别/地区限定词（循环外只算一次；查询侧剔除GDP术语中的"国内"）
-    const kwRegions = regionsOf(kw, true);
-
+    // 提取关键词核心词（去掉常见连接词）
+    const kwChars = kw.replace(/[的年月日个各]/g, '');
     const list = await kv.list({ prefix: 'kb:', limit: 200 });
     const keys = list.keys || list || [];
     let bestMatch = null;
@@ -195,70 +98,23 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
         if (card.status !== 'verified' && card.status !== 'auto_verified') continue;
         const title = (card.title || '').toLowerCase();
         const aliases = (card.aliases || []).map(a => String(a).toLowerCase());
-        const titleChars = (title + ' ' + aliases.join(' ')).replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
 
-        // 国别/地区冲突：查询与词条标题分属不同地区 → 该词条不参与匹配
-        // （如"美国GDP"不能命中"国内（中国）生产总值"卡；无地区属性的词条如大熊猫不受影响）
-        if (kwRegions.size > 0) {
-          const cardRegions = regionsOf(titleChars);
-          if (cardRegions.size > 0) {
-            let sameRegion = false;
-            for (const rg of kwRegions) if (cardRegions.has(rg)) { sameRegion = true; break; }
-            if (!sameRegion) continue;
-          }
-        }
-
-        // 双向包含（标题/别名）→ 直接命中
+        // 双向包含
         if (title.includes(kw) || kw.includes(title) || aliases.some(a => a.includes(kw) || kw.includes(a))) {
           bestMatch = r;
-          bestScore = 1;
           break;
         }
 
-        // 标题/别名 bigram 匹配（kw 覆盖率 与 标题覆盖率 取大，阈值 0.72）
-        const tScore = Math.max(overlap(titleChars), coverage(titleChars));
-        if (tScore >= 0.72) {
-          if (tScore > bestScore) { bestScore = tScore; bestMatch = r; }
-          continue;
+        // 核心词重叠匹配：去掉连接词后，统计共有字符数
+        const titleChars = title.replace(/[的年月日个各]/g, '');
+        let overlap = 0;
+        for (const ch of kwChars) {
+          if (titleChars.includes(ch)) overlap++;
         }
-
-        // entityOnly 模式（验证整句）：只认标题/别名，不做事实内容/数字匹配
-        if (entityOnly) continue;
-
-        // 事实内容匹配（label+value+metric）
-        const content = (card.facts || [])
-          .map(f => `${f.label || ''} ${f.value || ''} ${f.metric || ''}`)
-          .join(' ')
-          .toLowerCase();
-        // 数字串命中（如查"鲁迅 1881"命中含 1881 的鲁迅卡）→ 强信号。
-        // 但纯数字不能独立命中：去掉数字和出生/年份等通用词后，剩余的中文实体词
-        // 必须与标题/别名或事实内容有二元词重叠，否则"老舍1988"会误命中含1988纠错事实的鲁迅卡。
-        if (kwNums.length > 0 && kwNums.some(n => content.includes(n))) {
-          const kwEntity = kw
-            .replace(/\d+/g, '')
-            .replace(/出生|生於|生于|卒於|卒于|逝世|去世|年份|的人|作家|先生/g, '')
-            .replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
-          let entityOverlap = false;
-          if (kwEntity.length >= 2) {
-            const eBg = toBigrams(kwEntity);
-            const contentChars = content.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, '');
-            entityOverlap = [titleChars, contentChars].some(t => {
-              const tb = toBigrams(t);
-              let hit = 0;
-              for (const b of eBg) if (tb.has(b)) hit++;
-              return hit / eBg.size >= 0.5;
-            });
-          }
-          if (entityOverlap && 0.9 > bestScore) { bestScore = 0.9; bestMatch = r; }
-          continue;
-        }
-        // 内容 bigram 覆盖（阈值 0.5，要求 kw 核心串≥4字）
-        if (kwChars.length >= 4) {
-          const cScore = overlap(content.replace(/[的年月日个各吗呢啊是在有，。？?！!\s]/g, ''));
-          if (cScore >= 0.5 && cScore > bestScore) {
-            bestScore = cScore;
-            bestMatch = r;
-          }
+        const score = overlap / Math.max(kwChars.length, 1);
+        if (score > 0.6 && score > bestScore) {
+          bestScore = score;
+          bestMatch = r;
         }
       } catch {}
     }
@@ -282,8 +138,8 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
     }
   }
 
-  // 6. 写缓存（写到独立缓存库）
-  await cacheSet(ck, cacheK, card, KB_CACHE_TTL);
+  // 6. 写缓存
+  await cacheSet(kv, cacheK, card, KB_CACHE_TTL);
   return { hit: true, card };
 }
 
@@ -291,8 +147,7 @@ export async function queryEntry(kv, keyword, cacheKv = null, opts = {}) {
  * 获取词条详情（按 slug 或 key）
  */
 export async function getEntry(kv, key) {
-  const k = String(key || '').replace(/^kb:/, '');
-  const raw = await kv.get(entryKey(k)) || await kv.get(`kb:${key}`);
+  const raw = await kv.get(entryKey(key)) || await kv.get(`kb:${key}`);
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -410,17 +265,9 @@ export function autoAudit(card) {
     reasons.push('无官方或百科来源');
   }
 
-  // ② 多源交叉验证：facts 来源 + references 中至少2个独立域名
+  // ② 多源交叉验证：references 中至少2个独立域名
   const refs = card.references || [];
   const domains = new Set();
-  for (const f of card.facts) {
-    try {
-      if (f.source && f.source.url) {
-        const h = new URL(f.source.url).hostname.replace(/^www\./, '');
-        domains.add(h);
-      }
-    } catch {}
-  }
   for (const r of refs) {
     try {
       const h = new URL(r.url).hostname.replace(/^www\./, '');
@@ -441,6 +288,7 @@ export async function listVerified(kv, limit = 100, cursor = null) {
   const list = await kv.list({ prefix: 'kb:', limit, cursor });
   const keys = list.keys || list || [];
   const items = [];
+  const seen = new Set(); // 按 id 去重，防止历史/孤儿造成重复显示
   for (const item of keys) {
     // 跳过非主键（别名/索引/待审/历史）
     if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
@@ -450,8 +298,11 @@ export async function listVerified(kv, limit = 100, cursor = null) {
       if (!raw) continue;
       const card = JSON.parse(raw);
       if (card.status === 'verified' || card.status === 'auto_verified') {
+        const id = card.id || item.name.replace(/^kb:/, '');
+        if (seen.has(id)) continue;
+        seen.add(id);
         items.push({
-          id: card.id || item.name.replace(/^kb:/, ''),
+          id,
           title: card.title,
           category: card.category || 'auto',
           status: card.status,
@@ -486,7 +337,7 @@ export async function searchEntries(kv, keyword, limit = 20) {
       const aliases = (card.aliases || []).map(a => String(a).toLowerCase());
       if (title.includes(kw) || aliases.some(a => a.includes(kw))) {
         items.push({
-          id: card.id || item.name.replace(/^kb:/, ''),
+          id: card.id,
           title: card.title,
           category: card.category || 'auto',
           status: card.status,
@@ -502,9 +353,7 @@ export async function searchEntries(kv, keyword, limit = 20) {
 /**
  * 删除词条（主键 + 别名 + 分类索引 + 待审标记）
  */
-export async function deleteEntry(kv, slugRaw) {
-  // 容错：兼容传入完整主键（kb:xxx）或裸 slug
-  const slug = String(slugRaw || '').replace(/^kb:/, '');
+export async function deleteEntry(kv, slug) {
   // 读取卡片获取别名和分类
   const raw = await kv.get(entryKey(slug));
   if (raw) {
@@ -525,6 +374,13 @@ export async function deleteEntry(kv, slugRaw) {
         } catch {}
       }
     } catch {}
+  } else {
+    // 孤儿：主键不存在但 alias 可能还在，扫一遍清理所有指向此 slug 的 alias
+    const allAlias = await kv.list({ prefix: 'kb:alias:', limit: 1000 });
+    for (const a of (allAlias.keys || allAlias || [])) {
+      const v = await kv.get(a.name);
+      if (v === slug) await kv.delete(a.name);
+    }
   }
   // 删主键 + 待审标记
   await kv.delete(entryKey(slug));
@@ -585,7 +441,7 @@ export async function listStale(kv, days = 180, limit = 100) {
       const card = JSON.parse(raw);
       const verifiedAt = card.facts?.[0]?.verified_at || card.updated_at;
       if (verifiedAt && new Date(verifiedAt).getTime() < threshold) {
-        stale.push({ id: card.id || item.name.replace(/^kb:/, ''), title: card.title, updated_at: card.updated_at });
+        stale.push({ id: card.id, title: card.title, updated_at: card.updated_at });
       }
     } catch {}
   }

@@ -531,8 +531,15 @@ body {
     }
 
     if (data.draftCard) {
-      html += '<div class="report-section" style="color:#2e7d32;">★ 已入知识库，词条：' +
-        escapeHtml(data.draftCard.title || '') + '</div>';
+      if (data.autoStored) {
+        html += '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
+          escapeHtml(data.draftCard.title || '') + '（自动审核）</div>';
+      } else {
+        html += '<div class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度' + escapeHtml(data.confidence || '中') +
+          '，可手动入库。词条：' + escapeHtml(data.draftCard.title || '') +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
+          'onclick="window._manualStore()">入库</button></div>';
+      }
     }
 
     box.innerHTML = html || '<div class="empty-state">无报告数据</div>';

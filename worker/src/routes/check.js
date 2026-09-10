@@ -9,7 +9,7 @@ import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sour
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { submitDraft, queryEntry, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
+import { submitDraft } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
@@ -57,68 +57,6 @@ export async function handleCheck(request, env) {
  */
 const RATING_CN = { high: '高', medium: '中', low: '低', info: '查询结果', unknown: '未知' };
 function ratingCn(r) { return RATING_CN[r] || r; }
-// 评级归一化为中文（兼容 LLM 偶尔输出英文/旧卡片英文值）
-function normRating(rating) {
-  const s = String(rating || '').trim().toLowerCase();
-  if (['高', 'high', '属实', 'true'].includes(s)) return '高';
-  if (['低', 'low', '不实', 'false'].includes(s)) return '低';
-  if (['中', 'medium', '部分', 'partial'].includes(s)) return '中';
-  return '中';
-}
-
-/**
- * 从知识库卡片中挑出与断言相关的事实：
- * 断言含属性词（体重/身高/出生…）时只保留同属性事实，避免无关事实（如幼崽体重）干扰评级；
- * 挑不到则回退全量。
- */
-function relatedKbFacts(facts, text) {
-  if (!Array.isArray(facts) || facts.length === 0) return facts || [];
-  const m = String(text || '').match(ATTR_RE);
-  const attr = m ? m[1] : '';
-  if (!attr) return facts;
-  const related = facts.filter(f =>
-    (f.label || '').includes(attr) || (f.value || '').includes(attr)
-  );
-  return related.length > 0 ? related : facts;
-}
-
-// 外国中文国名 → 英文（用于英文 Tavily 检索：外国宏观数据总量在 BEA/IMF/世行等英文源最全）
-const FOREIGN_GDP_EN = {
-  '美国': 'United States', '日本': 'Japan', '德国': 'Germany', '英国': 'United Kingdom',
-  '法国': 'France', '印度': 'India', '韩国': 'South Korea', '加拿大': 'Canada',
-  '巴西': 'Brazil', '俄罗斯': 'Russia', '澳大利亚': 'Australia', '意大利': 'Italy',
-  '西班牙': 'Spain', '墨西哥': 'Mexico', '印度尼西亚': 'Indonesia', '印尼': 'Indonesia',
-  '荷兰': 'Netherlands', '瑞士': 'Switzerland', '沙特': 'Saudi Arabia', '土耳其': 'Turkey',
-  '波兰': 'Poland', '瑞典': 'Sweden', '比利时': 'Belgium', '爱尔兰': 'Ireland',
-  '以色列': 'Israel', '阿根廷': 'Argentina', '泰国': 'Thailand', '越南': 'Vietnam',
-  '新加坡': 'Singapore', '马来西亚': 'Malaysia', '菲律宾': 'Philippines', '南非': 'South Africa',
-  '阿联酋': 'United Arab Emirates', '埃及': 'Egypt', '乌克兰': 'Ukraine', '欧盟': 'European Union',
-  '新西兰': 'New Zealand', '挪威': 'Norway', '丹麦': 'Denmark', '芬兰': 'Finland',
-  '奥地利': 'Austria', '希腊': 'Greece', '葡萄牙': 'Portugal', '捷克': 'Czech Republic',
-  '智利': 'Chile', '哥伦比亚': 'Colombia', '巴基斯坦': 'Pakistan', '孟加拉国': 'Bangladesh',
-};
-const CHINA_WORDS = ['中国', '国内', '我国', '全国', '中方'];
-// 识别"外国+GDP总量"问题并构造英文检索词；问中国的返回 null
-function foreignGdpEnQuery(text) {
-  // "国内生产总值"是 GDP 固定术语（美国国内生产总值=美国GDP），先剔除再判断中国词
-  const t = String(text || '').replace(/国内生[产產][总總]值/g, '');
-  if (CHINA_WORDS.some(w => t.includes(w))) return null;
-  const yearM = t.match(/(?:19|20)\d{2}/);
-  for (const [zh, en] of Object.entries(FOREIGN_GDP_EN)) {
-    if (t.includes(zh)) {
-      const year = yearM ? yearM[0] : '';
-      return {
-        zh,
-        en,
-        year,
-        // 全网检索用长词；官方域名定向用短词（长词在官方站内召回率低）
-        query: `${en} nominal GDP ${year} gross domestic product total trillion dollars`.replace(/\s+/g, ' ').trim(),
-        shortQuery: `${en} GDP ${year} current-dollar trillion`.replace(/\s+/g, ' ').trim(),
-      };
-    }
-  }
-  return null;
-}
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
 const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
@@ -149,15 +87,8 @@ const INDICATORS = [
 ];
 
 function classifyProp(sentence) {
-  const s = String(sentence || '');
-  // 增长率强信号优先：含增长语义 + 百分比（中英文）。
-  // 必须放在"国内生产总值/GDP"之前，否则"GDP年化增长率为3.9%"会被误标成"国内生产总值"总量指标。
-  if (/(增长|增速|增幅|涨幅|同比|环比|grew|growth|annual(?:ized)?\s*rate|increased?|expanded|rose|raised?|surge|climb)/i.test(s)
-      && /(%|％|percent|百分点)/i.test(s)) {
-    return '增长率';
-  }
   for (const [kw, prop] of INDICATORS) {
-    if (s.includes(kw)) return prop;
+    if (sentence.includes(kw)) return prop;
   }
   return null;
 }
@@ -180,14 +111,8 @@ function buildFactCard(results, entity, queryText = '') {
   // 查询中的年份（如 2025），优先保留含该年份的数据句
   const yearM = String(queryText || '').match(/(19|20)\d{2}/);
   const wantYear = yearM ? yearM[0] : '';
-  // 查询问的指标（如问"生产总值"→总量句优先于增长率句，避免中文增长率官方句把英文总量句挤出）
-  const queryProp = classifyProp(String(queryText || '')) || '';
 
   for (const r of sorted) {
-    // 语种判断必须在清洗前、基于原始摘要：含拉丁字母且无 CJK 汉字即按英文处理。
-    // （不能用纯 ASCII 判断——€£等符号、表格|替换成的中文逗号都会误判；tradingeconomics 表格、countryeconomy 含€都靠此放行）
-    const rawHead = String(r.snippet || '').slice(0, 60);
-    const isEn = /[a-zA-Z]/.test(rawHead) && !/[\u4e00-\u9fff]/.test(rawHead);
     const snip = (r.snippet || '')
       .replace(/【[^】]*】/g, ' ')
       .replace(/```[\s\S]*?```/g, ' ')       // 代码块
@@ -195,15 +120,11 @@ function buildFactCard(results, entity, queryText = '') {
       .replace(/\*{1,3}/g, '')
       .replace(/#{1,6}\s*/g, '')              // markdown 标题符
       .replace(/`+/g, '')
-      .replace(/\|+/g, isEn ? ', ' : '，')    // 表格分隔（英文页用英文逗号，避免全角字符污染英文切句）
+      .replace(/\|+/g, '，')                  // 表格分隔
       .replace(/^[\s>·•\-–—*]+/gm, '');       // 行首符号
+    const isEn = /^[\x00-\x7F\s.,;:%()\-–—+]*$/.test(snip.slice(0, 60)) && /[a-zA-Z]/.test(snip.slice(0, 60));
     const srcName = r.site_name || r.title || '来源';
-    const source = {
-      name: srcName, url: r.url,
-      official: r.source === 'gov-direct' || !!r.official_tag,
-      official_tag: r.official_tag || (r.source === 'gov-direct'),
-      official_score: r.official_score || (r.official_tag ? 0.9 : 0.5),
-    };
+    const source = { name: srcName, url: r.url, official: r.source === 'gov-direct' || !!r.official_tag };
 
     // 切句并提取数据句（中文按句号/分号/换行切分，换行也算边界，避免标题与正文连成一句）
     let sentences = [];
@@ -217,27 +138,21 @@ function buildFactCard(results, entity, queryText = '') {
 
     for (let s0 of sentences) {
       const s = s0.replace(/\s+/g, ' ').trim();
-      if (s.length < 8 || s.length > (isEn ? 260 : 160)) continue;
+      if (s.length < 8 || s.length > 160) continue;
       // 跳过网页页脚/备案/导航噪音，以及纯标题（无句读且过短的导航词）
       if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图|首页|上一篇|下一篇|点击下载|字体大小|分享到/.test(s)) continue;
-      const hasData = isEn ? /\d[\d.,\-–—~]*[\s，,|]*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
+      const hasData = isEn ? /\d[\d.,\-–—~]*\s*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
         : new RegExp('\\d[\\d.,，\\-－—~～至到]*\\s*' + CN_UNIT).test(s);
       if (!hasData) continue;
       const prop = classifyProp(s) || '相关数据';
       // 含目标年份的句子加权排前
       const yearHit = wantYear && s.includes(wantYear);
-      // 与查询所问指标一致（问总量时总量句排前）
-      const propMatch = queryProp && prop === queryProp;
-      facts.push({ property: prop, value: s, source, yearHit, propMatch, official: source.official });
+      facts.push({ property: prop, value: s, source, yearHit, official: source.official });
     }
   }
 
-  // 排序：与查询指标一致 → 官方优先 → 含目标年份优先
-  // （指标匹配必须排在官方性之前：问总量时，非官方的总量句也比官方的增长率句更相关）
-  facts.sort((a, b) =>
-    (b.propMatch ? 1 : 0) - (a.propMatch ? 1 : 0) ||
-    (b.official ? 1 : 0) - (a.official ? 1 : 0) ||
-    (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
+  // 排序：官方优先 → 含目标年份优先
+  facts.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
 
   // 去重：同属性+相似开头只留一条（优先官方/含年份）
   const seen = new Set();
@@ -247,7 +162,7 @@ function buildFactCard(results, entity, queryText = '') {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(f);
-    if (out.length >= 18) break;
+    if (out.length >= 12) break;
   }
 
   return { title: entity || queryText || '', facts: out };
@@ -271,11 +186,34 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     entity = text.replace(hint, '').trim();
   }
   const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : text.trim();
-  // GDP/生产总值相关问题：追加"总量 万亿美元"补充检索，并触发英文 Tavily 检索
-  // 不要求问法含"是多少/多少"——"2025年美国生产总值"和"...是多少"应同等处理
-  const isGdpQuestion = /生产总值|GDP|gdp|经济总量|国内生产/i.test(text);
-  const isAmountQuestion = isGdpQuestion; // 只要含 GDP 关键词就走总量检索路径
-  const searchQueryExtra = isGdpQuestion ? `${searchQuery} 总量 万亿美元` : null;
+
+  // 外国实体检测：查询含外国国名时追加英文 Tavily 检索（外国数据在英文权威源最全）
+  // 这是通用逻辑，不限于 GDP——任何含外国国名的查询都走英文增强
+  const FOREIGN_EN = {
+    '美国': 'United States', '日本': 'Japan', '德国': 'Germany', '英国': 'United Kingdom',
+    '法国': 'France', '印度': 'India', '韩国': 'South Korea', '加拿大': 'Canada',
+    '巴西': 'Brazil', '俄罗斯': 'Russia', '澳大利亚': 'Australia', '意大利': 'Italy',
+    '西班牙': 'Spain', '墨西哥': 'Mexico', '印尼': 'Indonesia', '荷兰': 'Netherlands',
+    '瑞士': 'Switzerland', '沙特': 'Saudi Arabia', '土耳其': 'Turkey', '瑞典': 'Sweden',
+    '阿根廷': 'Argentina', '泰国': 'Thailand', '越南': 'Vietnam', '新加坡': 'Singapore',
+    '马来西亚': 'Malaysia', '南非': 'South Africa', '埃及': 'Egypt', '乌克兰': 'Ukraine',
+    '欧盟': 'European Union', '新西兰': 'New Zealand', '挪威': 'Norway', '丹麦': 'Denmark',
+    '芬兰': 'Finland', '希腊': 'Greece', '葡萄牙': 'Portugal', '捷克': 'Czech Republic',
+    '智利': 'Chile', '巴基斯坦': 'Pakistan', '波兰': 'Poland', '比利时': 'Belgium',
+  };
+  const CHINA_WORDS = ['中国', '国内', '我国', '全国', '中方'];
+  const foreignEn = (() => {
+    const t = String(text || '').replace(/国内生[产產][总總]值/g, ''); // "国内生产总值"是GDP术语，剔除后再判中国词
+    if (CHINA_WORDS.some(w => t.includes(w))) return null;
+    for (const [zh, en] of Object.entries(FOREIGN_EN)) {
+      if (t.includes(zh)) {
+        const yearM = t.match(/(?:19|20)\d{2}/);
+        return { en, year: yearM ? yearM[0] : '', hint: hint || '' };
+      }
+    }
+    return null;
+  })();
+
   const whitelist = env.OFFICIAL_WHITELIST
     ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
     : ['gov.cn', 'org.cn'];
@@ -295,70 +233,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     searchResults = [];
   }
 
-  // 总量型问题：用补充检索词再搜一次（总量/万亿美元），按 URL 去重合并
-  if (searchQueryExtra) {
-    try {
-      const cacheK2 = searchCacheKey(searchQueryExtra + '|card');
-      let extra = await cacheGet(env.FACT_CACHE, cacheK2);
-      if (!extra) {
-        const raw2 = await braveSearch({ query: searchQueryExtra, preferOfficial: true, topK: 5, whitelist, hint });
-        extra = annotateResults(raw2, env);
-        await cacheSet(env.FACT_CACHE, cacheK2, extra);
-      }
-      const seen = new Set((searchResults || []).map(r => r.url));
-      for (const r of extra || []) {
-        if (r.url && !seen.has(r.url)) { searchResults.push(r); seen.add(r.url); }
-      }
-    } catch { /* 补充检索失败忽略 */ }
-  }
-
-  // 外国 GDP 总量问题：英文 Tavily 检索（BEA/IMF/世界银行的总量数据英文源最全）
-  const enGdp = isAmountQuestion && /生产总值|GDP|gdp|国内生产/i.test(text) ? foreignGdpEnQuery(text) : null;
-  if (enGdp) {
-    try {
-      const cacheK3 = searchCacheKey('en|' + enGdp.query);
-      let enRes = await cacheGet(env.FACT_CACHE, cacheK3);
-      if (!enRes) {
-        // 轮1：全网英文（长词）；轮2：官方/权威数据站定向（短词，官方站内召回率更高）
-        const econDomains = ['bea.gov', 'imf.org', 'worldbank.org', 'oecd.org',
-          'tradingeconomics.com', 'statista.com', 'ceicdata.com', 'countryeconomy.com'];
-        const [tv, tvOff] = await Promise.all([
-          tavilySearch(enGdp.query, { apiKey: env.TAVILY_KEY, topK: 6, searchDepth: 'advanced' }),
-          tavilySearch(enGdp.shortQuery, {
-            apiKey: env.TAVILY_KEY, topK: 8, searchDepth: 'advanced',
-            includeDomains: econDomains,
-          }),
-        ]);
-        const merged = [...(tvOff.results || []), ...(tv.results || [])];
-        // Tavily 综合答案（通常直接含"GDP was $xx trillion in 2025"总量句）作为高优先级来源
-        const tavilyAnswer = tvOff.answer || tv.answer;
-        if (tavilyAnswer) {
-          merged.unshift({
-            title: `${enGdp.en} GDP ${enGdp.year}（检索引擎综合答案）`,
-            url: 'https://app.tavily.com/',
-            snippet: tavilyAnswer,
-            source: 'tavily',
-          });
-        }
-        enRes = annotateResults(merged, env);
-        await cacheSet(env.FACT_CACHE, cacheK3, enRes);
-      }
-      const seen3 = new Set((searchResults || []).map(r => r.url));
-      for (const r of enRes || []) {
-        if (r.url && !seen3.has(r.url)) { searchResults.push(r); seen3.add(r.url); }
-      }
-    } catch { /* 英文检索失败忽略 */ }
-  }
-
   // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
   if (intent === 'query') {
     try {
-      // 总量问题并发检索官方站的原始词与补充词
-      const govQueries = [searchQuery, searchQueryExtra].filter(Boolean);
-      const govSettled = await Promise.all(
-        govQueries.map(q => searchGovDirect(q, { apiKey: env.TAVILY_KEY }).catch(() => []))
-      );
-      const govAnnotated = govSettled.flatMap(g => annotateResults(g, env));
+      const govRaw = await searchGovDirect(searchQuery, { apiKey: env.TAVILY_KEY });
+      const govAnnotated = annotateResults(govRaw, env);
       // 官方结果排前合并
       searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
       // 相关性过滤：剔除只在正文顺带提及实体的无关词条（如查"大熊猫"却召回"犬/郊狼/柳江人"）
@@ -368,20 +247,50 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     } catch { /* 官方检索失败不影响维基结果 */ }
   }
 
+  // 外国实体英文 Tavily 检索：外国数据在英文权威站（BEA/IMF/世行/statista/tradingeconomics等）最全
+  // 检测到外国国名就做一轮英文 Tavily 搜索，结果合并到 searchResults
+  if (foreignEn && intent === 'query') {
+    try {
+      const enQuery = `${foreignEn.en} ${text}`.replace(/\s+/g, ' ').trim();
+      const enShort = `${foreignEn.en} ${foreignEn.hint || ''} ${foreignEn.year}`.replace(/\s+/g, ' ').trim();
+      const econDomains = ['bea.gov', 'imf.org', 'worldbank.org', 'oecd.org',
+        'tradingeconomics.com', 'statista.com', 'ceicdata.com', 'countryeconomy.com',
+        'wikipedia.org'];
+      const [tv1, tv2] = await Promise.all([
+        tavilySearch(enQuery, { apiKey: env.TAVILY_KEY, topK: 6, searchDepth: 'advanced' }),
+        tavilySearch(enShort, { apiKey: env.TAVILY_KEY, topK: 8, searchDepth: 'advanced', includeDomains: econDomains }),
+      ]);
+      const merged = [...(tv2.results || []), ...(tv1.results || [])];
+      const tavilyAnswer = tv2.answer || tv1.answer;
+      if (tavilyAnswer) {
+        merged.unshift({
+          title: `${foreignEn.en}（检索引擎综合答案）`,
+          url: 'https://app.tavily.com/',
+          snippet: tavilyAnswer,
+          source: 'tavily',
+        });
+      }
+      const enAnnotated = annotateResults(merged, env);
+      // 英文结果合并到前面
+      const seenEn = new Set((searchResults || []).map(r => r.url));
+      const enFiltered = enAnnotated.filter(r => r.url && !seenEn.has(r.url));
+      searchResults = [...enFiltered, ...(Array.isArray(searchResults) ? searchResults : [])];
+    } catch { /* 英文检索失败忽略 */ }
+  }
+
   // ---------- 分支 A：查询模式 → 百科卡片 + 直接解答 + 可信度 ----------
   if (intent === 'query') {
     const factCard = buildFactCard(searchResults, entity || text.trim(), text);
 
-    // 基于原始检索结果，让 LLM 直接提取数据并生成一句话解答。
-    // 不再依赖 buildFactCard 的正则过滤结果——正则会漏掉表格、含特殊符号的英文页面等，
-    // 把原始摘要直接喂给 LLM，让它自行理解、提取、分类。
+    // 基于原始检索结果，让 LLM 直接提取数据并生成解答。
+    // 把所有检索结果的原始摘要喂给 LLM，不做任何关键词/正则过滤——LLM 自行理解、提取、分类。
+    // 这样无论用户问什么（GDP、人口、体重、面积…），都不需要写专用适配逻辑。
     let answer = '';
     let confidence = 'low';
     let confidenceReason = '';
     if (searchResults && searchResults.length > 0) {
       try {
-        // 从原始检索结果构建 LLM 输入：取前 20 条，每条轻量清洗后截断到 350 字
-        const rawDataText = searchResults.slice(0, 20)
+        const rawDataText = searchResults
           .map((r, i) => {
             const snip = String(r.snippet || '')
               .replace(/```[\s\S]*?```/g, ' ')
@@ -390,9 +299,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
               .replace(/`+/g, '')
               .replace(/\s+/g, ' ')
               .trim()
-              .slice(0, 350);
+              .slice(0, 400);
             const tag = r.official_tag ? ' [官方]' : '';
-            return `[${i + 1}] ${r.title || ''}${tag}\n${snip}\nURL: ${r.url || ''}`;
+            return `[${i + 1}] ${r.title || ''}${tag}\n${snip}`;
           })
           .join('\n\n');
         const llmResp = await callLLMJson({
@@ -400,14 +309,14 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             {
               role: 'system',
               content: [
-                '你是资料核查助手。下面是检索引擎返回的多条网页摘要（含标题、正文片段、URL，标记[官方]的为官方来源）。',
+                '你是资料核查助手。下面是检索引擎返回的多条网页摘要（标记[官方]的为官方来源）。',
                 '请从中提取与用户问题直接相关的数据，生成一句话解答，并评估可信度。',
                 '规则：',
-                '1. 只能用与问题"同一指标"的数据作答——问总量不能用增长率代替，问增长率不能用总量代替；',
-                '2. 若摘要中没有该指标的直接数据：如实说明"未检索到〈指标〉的权威数据"，不得用相关指标冒充；',
-                '3. 年份、地区必须与问题一致，用相邻年份数据时必须标注；',
+                '1. 只能用与问题"同一指标"的数据作答——问总量不能用增长率代替，反之亦然；',
+                '2. 若摘要中没有该指标的直接数据：如实说明"未检索到相关权威数据"，不得用其他指标冒充；',
+                '3. 年份、地区必须与问题一致；',
                 '4. 英文单位换算要准确：trillion=万亿，billion=十亿，million=百万；',
-                '5. 数值忠实于来源，不要编造或凑数。',
+                '5. 数值忠实于来源，不要编造。',
                 '可信度判定：多个独立来源同一指标数据一致→"高"；仅单一来源或约数→"中"；数据缺失或矛盾→"低"。',
                 '只输出 JSON：{"answer":"一句话直接解答","confidence":"高或中或低","reason":"说明依据"}',
               ].join('\n'),
@@ -429,10 +338,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       } catch { /* LLM 失败则只展示数据卡片 */ }
     }
 
-    // 查询模式也生成 draftCard（供前端展示"入库"按钮用）
-    // 入库策略：可信度"高"→ 自动入库（auto_verified）；"中"/"低"→ 不自动入库，前端可选入库
+    // 查询模式也生成 draftCard（供入库用）
     let queryDraftCard = null;
-    let autoStored = false;
     if (factCard.facts.length > 0) {
       queryDraftCard = {
         title: entity || text.trim(),
@@ -442,33 +349,17 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           label: f.property || text.trim(),
           value: f.value || '',
           rating: 'high',
-          source: {
-            name: f.source?.name || '',
-            url: f.source?.url || '',
-            official_tag: f.source?.official || false,
-            official_score: f.source?.official ? 0.9 : 0.5,
-          },
+          source: f.source || {},
           verified_at: new Date().toISOString().slice(0, 10),
-          confidence: confidence,
         })),
         references: (searchResults || []).slice(0, 5).map(r => ({
           name: r.title || r.site_name || '',
           url: r.url || '',
           official_tag: r.official_tag || false,
-          official_score: r.official_tag ? 0.9 : 0.5,
         })),
-        confidence_tier: confidence, // 按可信度分类：高/中/低
       };
-      // 可信度"高"且 autoAudit 通过 → 自动入库
-      if (confidence === '高') {
-        const audit = autoAudit(queryDraftCard);
-        if (audit.pass) {
-          try {
-            const slug = slugify(queryDraftCard.title);
-            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
-            autoStored = true;
-          } catch {}
-        }
+      if (autoDraft) {
+        try { await submitDraft(env.FACT_KB, queryDraftCard); } catch {}
       }
     }
 
@@ -484,100 +375,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       corrections: [],
       ratings: [],
       draftCard: queryDraftCard,
-      autoStored,
     };
   }
 
   // ---------- 分支 B：断言模式 → 事实核查 ----------
-  // 0. 快路径：先用原文直接查知识库（仅标题/别名实体匹配，避免句中数字误命中）。
-  //    命中则只调用一次 LLM 同时完成"提取断言 + 对照知识库评级"，不联网、不提待审。
-  if (intent === 'assertion') {
-    try {
-      const kbPre = await queryEntry(env.FACT_KB, text, env.FACT_CACHE, { entityOnly: true });
-      if (kbPre?.hit && Array.isArray(kbPre.card?.facts) && kbPre.card.facts.length > 0) {
-        const kbCard = kbPre.card;
-        const kbRelated = relatedKbFacts(kbCard.facts.filter(f => f && (f.label || f.value)), text);
-        const kbFactsText = kbRelated
-          .map(f => `- ${f.label ? f.label + '：' : ''}${f.value || ''}`)
-          .join('\n');
-
-        const fastMsgs = [
-          { role: 'system', content: [
-            '你是严谨的事实核查助手。用户给出一段需要验证的断言，并附带知识库中已核实的事实。',
-            '请完成：',
-            '1. 提取断言中的每个事实点；',
-            '2. 逐条对照知识库事实评级：高=与知识库事实一致；低=与知识库事实矛盾；中=知识库没有覆盖该事实点、无法判定。',
-            '   数值判定规则：成年/一般主体的指标常因野生/人工饲养等情形存在多个范围，只要断言数值落入任一权威来源所述的正常范围/区间内，即判"高"；仅当数值明确超出所有相关范围时才判"低"（注意区分幼崽/幼仔等特殊生长阶段的数据，不要拿来否定成年个体的断言）；知识库完全没有对应属性的数据时才判"中"。',
-            '3. 与知识库矛盾时，在 correction 中用知识库事实给出正确说法；一致或无法判定时 correction 留空字符串。',
-            '仅输出 JSON 数组，元素格式：{"claim":"事实点","entity":"主体","rating":"高|中|低","evidence":"对照的知识库事实","correction":"纠错或空字符串"}。不要输出任何其他内容。',
-          ].join('\n') },
-          { role: 'user', content: `待验证断言：${text}\n\n知识库已核实事实（词条：${kbCard.title}）：\n${kbFactsText}` },
-        ];
-        const fastRaw = await callLLMJson({ messages: fastMsgs, apiKey, temperature: 0.1, maxTokens: 1024 });
-        if (Array.isArray(fastRaw) && fastRaw.length > 0) {
-          const fastRatings = fastRaw
-            .filter(r => r && r.claim)
-            .map(r => ({
-              claim: r.claim,
-              entity: r.entity || kbCard.title || '',
-              rating: normRating(r.rating),
-              evidence: r.evidence || '',
-              correction: r.correction || '',
-            }));
-          // 所有事实点都能被知识库判定（高=一致 / 低=矛盾）才走快路径；
-          // 只要有"中"（知识库覆盖不了）就降级到完整联网核查流程
-          if (fastRatings.length > 0 && fastRatings.every(r => r.rating === '高' || r.rating === '低')) {
-            const kbResults = kbRelated
-              .map(f => ({
-                title: `【知识库已核实】${f.source?.name || kbCard.title || ''}`,
-                url: f.source?.url || '',
-                snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
-                official_tag: !!(f.source?.official_tag || f.source?.official),
-                official_score: (f.source?.official_tag || f.source?.official) ? 0.9 : (f.source?.official_score || 0.6),
-                site_name: f.source?.name || '知识库',
-                from_kb: true,
-              }));
-            for (const ref of (kbCard.references || []).slice(0, 3)) {
-              if (ref.url && !kbResults.some(r => r.url === ref.url)) {
-                kbResults.push({
-                  title: ref.name || '参考来源',
-                  url: ref.url,
-                  snippet: '',
-                  official_tag: !!ref.official_tag,
-                  official_score: ref.official_tag ? 0.9 : 0.5,
-                  from_kb: true,
-                });
-              }
-            }
-            const claimsOut = fastRatings.map(r => ({ claim: r.claim, entity: r.entity }));
-            const ratingsOut = fastRatings.map(r => ({
-              claim: { claim: r.claim, entity: r.entity },
-              rating: r.rating,
-              evidence: r.evidence,
-              correction: r.correction,
-              sources: kbResults,
-            }));
-            const overall = ratingsOut.every(r => r.rating === '高')
-              ? '高'
-              : ratingsOut.some(r => r.rating === '低') ? '低' : '中';
-            return {
-              intent: 'verify',
-              claims: claimsOut,
-              searches: [{ claim: { claim: text, entity: kbCard.title }, results: kbResults, cached: true, fromKb: true }],
-              rating: overall,
-              kb_hit: true,
-              corrections: ratingsOut.filter(r => r.correction).map(r => ({
-                claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
-              })),
-              ratings: ratingsOut,
-              draftCard: null,
-            };
-          }
-        }
-      }
-    } catch { /* 快路径异常或知识库覆盖不足 → 降级到完整核查流程 */ }
-  }
-
   // 1. LLM 提取事实断言
   const extractMsgs = buildExtractFactsMessages(text, context);
   const claims = await callLLMJson({
@@ -591,53 +392,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
 
-  // 2. 对每条断言检索证据：先查知识库（已核实事实直接用），未命中再联网
+  // 2. 对每条断言检索证据
   const checkSearches = await Promise.all(
     claims.slice(0, 5).map(async (c) => {
       const attrM2 = (c.claim || '').match(ATTR_RE);
       const hint2 = attrM2 ? attrM2[1] : '';
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
-
-      // 2a. 知识库快路径：实体已入库 → 直接用已核实事实作为证据，不再联网
-      if (entity2) {
-        try {
-          const kb = await queryEntry(env.FACT_KB, entity2, env.FACT_CACHE);
-          if (kb?.hit && Array.isArray(kb.card?.facts) && kb.card.facts.length > 0) {
-            const kbRelated = relatedKbFacts(
-              kb.card.facts.filter(f => f && (f.label || f.value)),
-              c.claim || ''
-            );
-            const kbResults = kbRelated
-              .map(f => ({
-                title: `【知识库已核实】${f.source?.name || kb.card.title || entity2}`,
-                url: f.source?.url || '',
-                snippet: `${f.label ? f.label + '：' : ''}${f.value || ''}`.slice(0, 300),
-                official_tag: !!(f.source?.official_tag || f.source?.official),
-                official_score: (f.source?.official_tag || f.source?.official) ? 0.9 : (f.source?.official_score || 0.6),
-                site_name: f.source?.name || '知识库',
-                from_kb: true,
-              }));
-            // 补充卡片参考来源链接
-            for (const ref of (kb.card.references || []).slice(0, 3)) {
-              if (ref.url && !kbResults.some(r => r.url === ref.url)) {
-                kbResults.push({
-                  title: ref.name || '参考来源',
-                  url: ref.url,
-                  snippet: '',
-                  official_tag: !!ref.official_tag,
-                  official_score: ref.official_tag ? 0.9 : 0.5,
-                  from_kb: true,
-                });
-              }
-            }
-            if (kbResults.length > 0) {
-              return { claim: c, results: kbResults, cached: true, fromKb: true };
-            }
-          }
-        } catch { /* 知识库查询失败则走联网 */ }
-      }
-
-      // 2b. 联网检索（知识库未命中）
       const sq = entity2 ? (hint2 ? `${entity2} ${hint2}` : entity2) : c.claim;
       const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
@@ -658,7 +418,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   const ratings = await Promise.all(
     checkSearches.map(async (sr) => {
       if (!sr.results || sr.results.length === 0) {
-        return { claim: sr.claim, rating: '低', evidence: '未找到相关证据', correction: '建议人工核实' };
+        return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实' };
       }
       try {
         const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
@@ -669,37 +429,37 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           temperature: 0.1,
           maxTokens: 1024,
         });
-        return { claim: sr.claim, ...r, rating: normRating(r.rating), sources: sr.results };
+        return { claim: sr.claim, ...r, sources: sr.results };
       } catch (e) {
-        return { claim: sr.claim, rating: '中', evidence: '评级失败', correction: e.message };
+        return { claim: sr.claim, rating: 'medium', evidence: '评级失败', correction: e.message };
       }
     })
   );
 
-  // 4. 知识库草稿（全部证据都来自知识库时不再重复提交待审）
+  // 4. 知识库草稿
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
-  const allFromKb = checkSearches.every(s => s.fromKb);
-  if (autoDraft && draftCard && draftCard.facts.length > 0 && !allFromKb) {
+  if (autoDraft && draftCard && draftCard.facts.length > 0) {
     try { await submitDraft(env.FACT_KB, draftCard); } catch {}
   }
 
-  const overall = ratings.every(r => r.rating === '高')
+  const overall = ratings.every(r => r.rating === 'high')
     ? '高'
-    : ratings.some(r => r.rating === '低')
+    : ratings.some(r => r.rating === 'low')
     ? '低'
     : '中';
+
+  // 评级转中文
+  const ratingsCn = ratings.map(r => ({ ...r, rating: ratingCn(r.rating) }));
 
   return {
     intent: 'verify',
     claims,
     searches: checkSearches,
     rating: overall,
-    kb_hit: checkSearches.some(s => s.fromKb),
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
-    ratings,
-    // 全部证据都来自知识库时不返回入库卡片（前端不再提示自动入库）
-    draftCard: allFromKb ? null : draftCard,
+    ratings: ratingsCn,
+    draftCard,
   };
 }

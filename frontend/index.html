@@ -588,7 +588,13 @@ body {
               body: JSON.stringify({ keyword: text })
             });
             if (kbData.hit && kbData.card) {
-              renderReport(kbData);
+              // KB 命中：把第一条事实作为"直接解答"显示，让用户看到一句话答案
+              var card = kbData.card;
+              var ans = '';
+              if (card.facts && card.facts.length) {
+                ans = (card.facts[0].label || '') + '：' + (card.facts[0].value || '');
+              }
+              renderReport({ intent: 'query', answer: ans, confidence: '高', confidenceReason: '来自知识库' + (card.facts ? '（' + card.facts.length + '条事实）' : ''), factCard: card });
               renderResults([]);
               kbHit = true;
             }

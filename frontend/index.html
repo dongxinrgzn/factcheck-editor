@@ -309,8 +309,7 @@ body {
     workerKey: localStorage.getItem('fc_worker_key') || '',
     mode: 'query',
     busy: false,
-    kbEntries: [],
-    lastQueryData: null
+    kbEntries: []
   };
 
   // DOM
@@ -376,7 +375,7 @@ body {
       return;
     }
     box.innerHTML = results.map(function(r) {
-      var tagHtml = (r.official_tag || r.official)
+      var tagHtml = r.official_tag
         ? '<span class="tag-official">★官方</span>'
         : '<span class="tag-unofficial">待甄别</span>';
       var title = r.title || '(无标题)';
@@ -455,7 +454,7 @@ body {
       var card = data.card;
       var factsHtml = (card.facts || []).map(function(f) {
         var src = f.source || {};
-        var srcTag = (src.official_tag || src.official) ? '<span class="tag-official">★官方</span>' : '';
+        var srcTag = src.official_tag ? '<span class="tag-official">★官方</span>' : '';
         var staleBadge = isStale(f.verified_at) ? '<span class="stale-badge">待复核</span>' : '';
         return '<div class="kb-fact">' +
           '<span class="label">' + escapeHtml(f.label || '') + ':</span> ' +
@@ -532,15 +531,8 @@ body {
     }
 
     if (data.draftCard) {
-      if (data.autoStored) {
-        html += '<div class="report-section" style="color:#2e7d32;">★ 可信度高，已自动入知识库，词条：' +
-          escapeHtml(data.draftCard.title || '') + '</div>';
-      } else {
-        html += '<div class="report-section" style="color:#1565c0;">☆ 可信度' + escapeHtml(data.confidence || '中') +
-          '，可手动入库。词条：' + escapeHtml(data.draftCard.title || '') +
-          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
-          'onclick="window._manualStore()">入库</button></div>';
-      }
+      html += '<div class="report-section" style="color:#2e7d32;">★ 已入知识库，词条：' +
+        escapeHtml(data.draftCard.title || '') + '</div>';
     }
 
     box.innerHTML = html || '<div class="empty-state">无报告数据</div>';
@@ -611,7 +603,6 @@ body {
           var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
           renderResults(allResults);
           renderReport(cd);
-          state.lastQueryData = cd;
         }
       }
     } catch (e) {
@@ -631,32 +622,8 @@ body {
         method: 'POST',
         body: JSON.stringify({ text: text, action: 'submit' })
       });
-      if (r.auto_audited) {
-        alert('已自动入库（可信度高）\n词条：' + (r.card && r.card.title) +
-          '\n事实条数：' + (r.card && r.card.facts ? r.card.facts.length : 0));
-      } else {
-        alert('已提议入库（可信度不足自动入库，需手动选择入库）\n词条：' + (r.card && r.card.title) +
-          '\n事实条数：' + (r.card && r.card.facts ? r.card.facts.length : 0) +
-          '\n原因：' + (r.audit_reasons || []).join('、'));
-      }
-    } catch (e) {
-      alert('入库失败：' + e.message);
-    }
-  };
-
-  // 手动入库（从查询结果页直接入库当前 draftCard）
-  window._manualStore = async function() {
-    if (!state.lastQueryData || !state.lastQueryData.draftCard) {
-      alert('无可入库的词条');
-      return;
-    }
-    try {
-      var card = state.lastQueryData.draftCard;
-      var r = await apiFetch('/api/kb/submit', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'approve', slug: '', card: card })
-      });
-      alert('已入库：' + (card.title || ''));
+      alert('已提议入库，待管理员审核。\n词条：' + (r.card && r.card.title) +
+        '\n事实条数：' + (r.card && r.card.facts ? r.card.facts.length : 0));
     } catch (e) {
       alert('入库失败：' + e.message);
     }

@@ -21,9 +21,10 @@ export function ancientCacheKey(text) {
 
 /**
  * 生成知识库查询缓存 key
+ * 注意：使用 kbcache: 前缀避免与词条主键 kb:${slug} 冲突
  */
 export function kbCacheKey(keyword) {
-  return 'kbc:' + simpleHash(keyword || '');
+  return 'kbcache:' + simpleHash(keyword || '');
 }
 
 /**
@@ -49,6 +50,56 @@ export async function cacheSet(kv, key, value, ttl = DEFAULT_TTL) {
   } catch (e) {
     // KV 写入失败不影响主流程
   }
+}
+
+/**
+ * 删除缓存
+ */
+export async function cacheDelete(kv, key) {
+  if (!kv || !key) return;
+  try {
+    await kv.delete(key);
+  } catch (e) {
+    // KV 删除失败不影响主流程
+  }
+}
+
+/**
+ * 清除所有缓存（FACT_CACHE 中的所有条目）
+ */
+export async function clearAllCache(kv) {
+  if (!kv) return { cleared: 0 };
+  let cleared = 0;
+  try {
+    const list = await kv.list({ limit: 1000 });
+    const keys = list.keys || list || [];
+    for (const item of keys) {
+      try {
+        await kv.delete(item.name);
+        cleared++;
+      } catch {}
+    }
+  } catch {}
+  return { cleared };
+}
+
+/**
+ * 清除知识库缓存（FACT_KB 中以 kbcache: 开头的缓存条目）
+ */
+export async function clearKBCache(kv) {
+  if (!kv) return { cleared: 0 };
+  let cleared = 0;
+  try {
+    const list = await kv.list({ prefix: 'kbcache:', limit: 1000 });
+    const keys = list.keys || list || [];
+    for (const item of keys) {
+      try {
+        await kv.delete(item.name);
+        cleared++;
+      } catch {}
+    }
+  } catch {}
+  return { cleared };
 }
 
 /**

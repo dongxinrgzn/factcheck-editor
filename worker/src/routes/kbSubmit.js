@@ -3,6 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
 import { submitDraft, approveEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify } from '../utils/kbStore.js';
+import { clearAllCache, clearKBCache } from '../utils/cache.js';
 import { runCheck } from './check.js';
 
 export async function handleKbSubmit(request, env) {
@@ -116,6 +117,30 @@ export async function handleKbSubmit(request, env) {
     if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
     const result = await deleteEntry(env.FACT_KB, slug);
     return jsonResponse({ ok: true, data: result }, 200, request);
+  }
+
+  // 清除所有缓存
+  if (action === 'clear_cache') {
+    const { type = 'all' } = body;
+    let result = {};
+    if (type === 'all' || type === 'search') {
+      const searchResult = await clearAllCache(env.FACT_CACHE);
+      result.searchCache = searchResult;
+    }
+    if (type === 'all' || type === 'kb') {
+      const kbResult = await clearKBCache(env.FACT_KB);
+      result.kbCache = kbResult;
+    }
+    return jsonResponse({ ok: true, data: result }, 200, request);
+  }
+
+  // 手动入库：用户点击"入库"按钮，直接审核通过入库（不经过待审队列）
+  if (action === 'manual_store') {
+    const { card } = body;
+    if (!card || !card.title) return errorJson('card 字段必填且需要 title', 400, 'BAD_REQUEST', request);
+    const slug = card.id || slugify(card.title);
+    const result = await approveEntry(env.FACT_KB, slug, { ...card, status: 'verified', category: '人工' }, isAdmin ? 'admin' : 'curator');
+    return jsonResponse({ ok: true, data: { ...result, card, stored: true } }, 200, request);
   }
 
   // 提议入库

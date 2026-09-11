@@ -313,7 +313,8 @@ body {
     workerKey: localStorage.getItem('fc_worker_key') || '',
     mode: 'query',
     busy: false,
-    kbEntries: []
+    kbEntries: [],
+    lastDraftCard: null,  // 最近一次核查生成的 draftCard
   };
 
   // DOM
@@ -536,14 +537,18 @@ body {
     }
 
     if (data.draftCard) {
+      state.lastDraftCard = data.draftCard;  // 保存到 state 供手动入库使用
       if (data.autoStored) {
         html += '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
           escapeHtml(data.draftCard.title || '') + '（自动审核）</div>';
       } else {
-        html += '<div class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度' + escapeHtml(data.confidence || '中') +
-          '，可手动入库。词条：' + escapeHtml(data.draftCard.title || '') +
+        var confLabel = data.confidence || '中';
+        html += '<div class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
+          '。词条：' + escapeHtml(data.draftCard.title || '') +
           ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
-          'onclick="window._manualStore()">入库</button></div>';
+          'onclick="window._manualStore()">入库</button>' +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
+          'onclick="window._skipStore()">不入库</button></div>';
       }
     }
 
@@ -629,6 +634,31 @@ body {
     state.busy = false;
     $('btn-check').textContent = '查证';
     $('btn-check').disabled = false;
+  };
+
+  // 手动入库：用户点击"入库"按钮，直接审核通过入库
+  window._manualStore = async function() {
+    var card = state.lastDraftCard;
+    if (!card) { alert('没有可入库的数据，请先查证'); return; }
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ card: card, action: 'manual_store' })
+      });
+      alert('入库成功！\n词条：' + (r.card && r.card.title) + '\n状态：人工审核');
+      state.lastDraftCard = null;
+      loadKbList('');
+    } catch (e) {
+      alert('入库失败：' + e.message);
+    }
+  };
+
+  // 不入库：放弃当前核查结果
+  window._skipStore = function() {
+    state.lastDraftCard = null;
+    var box = $('report-area');
+    var tip = box.querySelector('[style*="dashed #bbdefb"]');
+    if (tip) tip.innerHTML = '<span style="color:#999;">已放弃入库</span>';
   };
 
   // 提议入库（后端自动核查提取事实并生成词条草稿）

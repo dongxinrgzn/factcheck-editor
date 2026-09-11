@@ -368,11 +368,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         confidence_tier: confidence,
       };
       if (confidence === '高') {
+        // 高可信度：尝试自动审核入库
         const audit = autoAudit(queryDraftCard);
         if (audit.pass) {
           try {
             const slug = slugify(queryDraftCard.title);
-            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
+            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified', category: '自动' }, 'auto_audit');
             queryAutoStored = true;
           } catch {}
         }

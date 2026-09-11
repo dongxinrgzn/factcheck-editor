@@ -1,6 +1,6 @@
 // FACT_KB 知识库读写 + 别名/分类索引
 
-import { cacheGet, cacheSet, kbCacheKey, KB_CACHE_TTL } from './cache.js';
+import { cacheGet, cacheSet, cacheDelete, kbCacheKey, KB_CACHE_TTL } from './cache.js';
 
 /**
  * 生成词条主键
@@ -90,7 +90,8 @@ export async function queryEntry(kv, keyword) {
     let bestScore = 0;
     for (const item of keys) {
       if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
-          item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:')) continue;
+          item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:') ||
+          item.name.startsWith('kbcache:')) continue;
       try {
         const r = await kv.get(item.name);
         if (!r) continue;
@@ -285,7 +286,7 @@ export function autoAudit(card) {
 
 /**
  * 列出已入库词条（verified 状态）
- * 实现：用 alias 反查主键，绕过 kv.list 的边缘缓存
+ * 实现：用 alias 反查主键，若 alias 为空则回退扫描主键兜底
  */
 export async function listVerified(kv, limit = 100, cursor = null) {
   // 1. 列出所有 alias（每个词条 title 和每个别名都有一个 alias key）
@@ -299,7 +300,18 @@ export async function listVerified(kv, limit = 100, cursor = null) {
       if (v) slugSet.add(v);
     } catch {}
   }
-  // 3. 对每个主键 get 真实数据
+  // 3. 如果 alias 路径一无所获，回退到直接扫描主键兜底
+  if (slugSet.size === 0) {
+    const allKeys = await kv.list({ prefix: 'kb:', limit: 1000 });
+    for (const item of (allKeys.keys || allKeys || [])) {
+      if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
+          item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:') ||
+          item.name.startsWith('kbcache:')) continue;
+      const slug = item.name.replace(/^kb:/, '');
+      if (slug) slugSet.add(slug);
+    }
+  }
+  // 4. 对每个主键 get 真实数据
   const items = [];
   const seen = new Set();
   for (const slug of slugSet) {
@@ -336,7 +348,8 @@ export async function searchEntries(kv, keyword, limit = 20) {
   const items = [];
   for (const item of keys) {
     if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
-        item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:')) continue;
+        item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:') ||
+        item.name.startsWith('kbcache:')) continue;
     try {
       const raw = await kv.get(item.name);
       if (!raw) continue;
@@ -360,7 +373,7 @@ export async function searchEntries(kv, keyword, limit = 20) {
 }
 
 /**
- * 删除词条（主键 + 别名 + 分类索引 + 待审标记）
+ * 删除词条（主键 + 别名 + 分类索引 + 待审标记 + 缓存）
  */
 export async function deleteEntry(kv, slug) {
   // 读取卡片获取别名和分类
@@ -368,8 +381,11 @@ export async function deleteEntry(kv, slug) {
   if (raw) {
     try {
       const card = JSON.parse(raw);
-      // 删别名索引
+      // 清除缓存：基于 title 和所有别名
+      await cacheDelete(kv, kbCacheKey(card.title));
       for (const alias of card.aliases || []) {
+        await cacheDelete(kv, kbCacheKey(alias));
+        // 删别名索引
         await kv.delete(aliasKey(alias));
       }
       await kv.delete(aliasKey(card.title));

@@ -225,8 +225,21 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     if (cached) {
       searchResults = cached;
     } else {
-      const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint });
+      const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint, tavilyApiKey: env.TAVILY_KEY });
       searchResults = annotateResults(raw, env);
+      // 如果 Wikipedia/DDG/SearXNG 返回的结果全被过滤或为空，用 Tavily 兜底
+      if (!searchResults || searchResults.length === 0) {
+        try {
+          // Tavily 中文支持差，自动转英文查询
+          const tavilyQuery = /[\u4e00-\u9fa5]/.test(entity || searchQuery)
+            ? `${entity || searchQuery} site:wikipedia.org OR site:baike.baidu.com`
+            : (entity || searchQuery);
+          const tavily = await tavilySearch(tavilyQuery, { apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'advanced' });
+          if (tavily.results && tavily.results.length > 0) {
+            searchResults = annotateResults(tavily.results, env);
+          }
+        } catch {}
+      }
       await cacheSet(env.FACT_CACHE, cacheK, searchResults);
     }
   } catch {
@@ -236,7 +249,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
   if (intent === 'query') {
     try {
-      const govRaw = await searchGovDirect(searchQuery, { apiKey: env.TAVILY_KEY });
+      const govRaw = await searchGovDirect(entity || searchQuery, { apiKey: env.TAVILY_KEY });
       const govAnnotated = annotateResults(govRaw, env);
       // 官方结果排前合并
       searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
@@ -290,18 +303,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     let confidenceReason = '';
     if (searchResults && searchResults.length > 0) {
       try {
+        const cleanSnippet = (s) => String(s || '')
+          .replace(/```[\s\S]*?```/g, ' ')
+          .replace(/\*{1,3}/g, '')
+          .replace(/#{1,6}\s*/g, '')
+          .replace(/`+/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        // 全量喂给 LLM，不截断——Qwen2.5-72B 上下文 32K tokens，
+        // 13 条摘要约 6500 tokens，远在限制内。
         const rawDataText = searchResults
           .map((r, i) => {
-            const snip = String(r.snippet || '')
-              .replace(/```[\s\S]*?```/g, ' ')
-              .replace(/\*{1,3}/g, '')
-              .replace(/#{1,6}\s*/g, '')
-              .replace(/`+/g, '')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .slice(0, 400);
             const tag = r.official_tag ? ' [官方]' : '';
-            return `[${i + 1}] ${r.title || ''}${tag}\n${snip}`;
+            return `[${i + 1}] ${r.title || ''}${tag}\n${cleanSnippet(r.snippet)}`;
           })
           .join('\n\n');
         const llmResp = await callLLMJson({

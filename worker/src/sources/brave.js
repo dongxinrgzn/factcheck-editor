@@ -618,11 +618,11 @@ export async function searxSiteSearch(domain, query, topK = 6) {
 
 /**
  * 综合全网检索（多源兜底）
- * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint }
+ * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey }
  *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
  */
 export async function braveSearch(opts = {}) {
-  const { query, topK = 5, hint = '' } = opts;
+  const { query, topK = 5, hint = '', tavilyApiKey } = opts;
   if (!query) return [];
 
   // 维基 → DDG → SearXNG，任一源有结果即返回（合并去重）
@@ -633,7 +633,32 @@ export async function braveSearch(opts = {}) {
   }
   const ddg = await ddgSearch(query, topK);
   if (ddg.length > 0) return ddg.slice(0, topK);
-  return await searxSearch(query, topK);
+  const searx = await searxSearch(query, topK);
+  if (searx.length > 0) return searx;
+
+  // 兜底：Tavily 全网搜索（当 Wikipedia/DDG/SearXNG 全部失败时）
+  if (tavilyApiKey) {
+    try {
+      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'basic' });
+      if (tavily.results && tavily.results.length > 0) return tavily.results.slice(0, topK);
+    } catch {}
+  }
+  return [];
+}
+
+/**
+ * 强制全网搜索（跳过缓存，Tavily 优先）
+ * 当 braveSearch 返回的结果不相关时使用
+ */
+export async function braveSearchForce(query, topK = 5, tavilyApiKey) {
+  if (!query) return [];
+  if (tavilyApiKey) {
+    try {
+      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'advanced' });
+      if (tavily.results && tavily.results.length > 0) return tavily.results.slice(0, topK);
+    } catch {}
+  }
+  return braveSearch({ query, topK });
 }
 
 export async function braveSearchAll(query, topK = 5) {

@@ -27,12 +27,10 @@ export function buildDraftCard(claims, ratings, searchResults) {
     // rating 与 claim 按引用对应（ratings 顺序与 searchResults 一致）
     const rt = ratings?.[i] || {};
     const evidence = (rt.evidence || '').slice(0, 100);
-    // 评级归一化（兼容英文旧值）
-    const rating = ({ high: '高', medium: '中', low: '低' })[rt.rating] || rt.rating || '中';
     let value = '';
     if (rt.correction) value = `纠错：${rt.correction}`;
-    else if (rating === '高') value = evidence ? `属实：${evidence}` : '属实';
-    else if (rating === '低') value = evidence ? `存疑：${evidence}` : '存疑，建议人工核实';
+    else if (rt.rating === 'high') value = evidence ? `属实：${evidence}` : '属实';
+    else if (rt.rating === 'low') value = evidence ? `存疑：${evidence}` : '存疑，建议人工核实';
     else value = evidence || '待人工核实';
 
     return {
@@ -41,7 +39,7 @@ export function buildDraftCard(claims, ratings, searchResults) {
       value,
       metric: c.metric || '',
       time: c.time || '',
-      rating,
+      rating: rt.rating || 'medium',
       source: top ? {
         name: top.title,
         url: top.url,
@@ -49,7 +47,7 @@ export function buildDraftCard(claims, ratings, searchResults) {
         official_tag: !!top.official_tag,
       } : null,
       verified_at: today,
-      confidence: rating,
+      confidence: rt.rating || 'medium',
     };
   }).filter(f => f.value && f.source);
 

@@ -307,8 +307,9 @@ body {
   'use strict';
 
   // 状态
+  var DEFAULT_API = 'https://factcheck.mymili.top';
   var state = {
-    baseUrl: localStorage.getItem('fc_base_url') || '',
+    baseUrl: localStorage.getItem('fc_base_url') || DEFAULT_API,
     workerKey: localStorage.getItem('fc_worker_key') || '',
     mode: 'query',
     busy: false,
@@ -324,7 +325,8 @@ body {
 
   // 保存配置
   $('btn-save-cfg').onclick = function() {
-    state.baseUrl = $('cfg-url').value.trim().replace(/\/$/, '');
+    var v = $('cfg-url').value.trim().replace(/\/$/, '');
+    state.baseUrl = v || DEFAULT_API; // 空值回退到默认
     state.workerKey = $('cfg-key').value.trim();
     localStorage.setItem('fc_base_url', state.baseUrl);
     localStorage.setItem('fc_worker_key', state.workerKey);

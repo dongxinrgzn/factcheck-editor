@@ -605,11 +605,30 @@ body {
               body: JSON.stringify({ keyword: text })
             });
             if (kbData.hit && kbData.card) {
-              // KB 命中：把第一条事实作为"直接解答"显示，让用户看到一句话答案
+              // KB 命中：从 facts 中找与用户查询最相关的一条作为"直接解答"
               var card = kbData.card;
               var ans = '';
               if (card.facts && card.facts.length) {
-                ans = (card.facts[0].label || '') + '：' + (card.facts[0].value || '');
+                var kw = text.toLowerCase();
+                // 优先找 label 与查询词匹配的 fact
+                var best = card.facts.find(function(f) {
+                  var lbl = (f.label || '').toLowerCase();
+                  return lbl && kw.includes(lbl) || lbl.includes(kw);
+                });
+                // 其次找 value 中含查询关键词的 fact
+                if (!best) {
+                  best = card.facts.find(function(f) {
+                    return (f.value || '').includes(text) || text.includes((f.label || ''));
+                  });
+                }
+                // 兜底：跳过"相关数据"等无意义标签，找有实际数值的
+                if (!best) {
+                  best = card.facts.find(function(f) {
+                    return f.label && f.label !== '相关数据' && /\d/.test(f.value || '');
+                  });
+                }
+                if (!best) best = card.facts[0];
+                ans = (best.label || '') + '：' + (best.value || '');
               }
               renderReport({ intent: 'query', answer: ans, confidence: '高', confidenceReason: '来自知识库' + (card.facts ? '（' + card.facts.length + '条事实）' : ''), factCard: card });
               renderResults([]);

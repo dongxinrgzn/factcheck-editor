@@ -39,21 +39,11 @@ export async function handleKbSubmit(request, env) {
     return jsonResponse({ ok: true, data: { items } }, 200, request);
   }
 
-  // 审核通过 / 手动入库
+  // 审核通过
   if (action === 'approve') {
-    const { slug: rawSlug, card: approveCard, timestamp } = body;
-    const slug = rawSlug || (approveCard ? slugify(approveCard.title) : '');
+    const { slug, card: approveCard, timestamp } = body;
     if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
-    let incomingCard = approveCard;
-    // 未直接带卡片时，从待审队列读取草稿
-    if (!incomingCard && timestamp) {
-      try {
-        const pendingRaw = await env.FACT_KB.get(`kb:pending:${timestamp}:${slug}`);
-        if (pendingRaw) incomingCard = JSON.parse(pendingRaw);
-      } catch {}
-    }
-    if (!incomingCard) return errorJson('待审词条不存在或缺少卡片内容', 404, 'NOT_FOUND', request);
-    const result = await approveEntry(env.FACT_KB, slug, incomingCard, isAdmin ? 'admin' : 'curator');
+    const result = await approveEntry(env.FACT_KB, slug, approveCard || card, isAdmin ? 'admin' : 'curator');
     if (timestamp) await clearPending(env.FACT_KB, timestamp, slug);
     return jsonResponse({ ok: true, data: result }, 200, request);
   }
@@ -80,6 +70,27 @@ export async function handleKbSubmit(request, env) {
     const { limit, cursor } = body;
     const data = await listVerified(env.FACT_KB, limit || 100, cursor || null);
     return jsonResponse({ ok: true, data }, 200, request);
+  }
+
+  // 数据迁移：把 curator='auto_audit' 但 status 仍为 'verified' 的历史词条改为 'auto_verified'
+  if (action === 'migrate_status') {
+    const list = await env.FACT_KB.list({ prefix: 'kb:', limit: 1000 });
+    let migrated = 0;
+    for (const item of (list.keys || list || [])) {
+      if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
+          item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:')) continue;
+      try {
+        const raw = await env.FACT_KB.get(item.name);
+        if (!raw) continue;
+        const c = JSON.parse(raw);
+        if (c.curator === 'auto_audit' && c.status === 'verified') {
+          c.status = 'auto_verified';
+          await env.FACT_KB.put(item.name, JSON.stringify(c));
+          migrated++;
+        }
+      } catch {}
+    }
+    return jsonResponse({ ok: true, data: { migrated } }, 200, request);
   }
 
   // 搜索知识库

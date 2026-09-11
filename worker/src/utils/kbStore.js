@@ -195,10 +195,12 @@ export async function approveEntry(kv, slug, card, curator = 'admin') {
   if (old) {
     await kv.put(historyKey(slug, old.version || 1), JSON.stringify(old));
   }
+  // 尊重调用方传入的 status（auto_verified / verified），未传时默认 verified
+  const finalStatus = (card && card.status) || 'verified';
   const finalCard = {
     ...card,
     id: slug,
-    status: 'verified',
+    status: finalStatus,
     version: newVersion,
     updated_at: now,
     created_at: old?.created_at || now,
@@ -225,7 +227,7 @@ export async function approveEntry(kv, slug, card, curator = 'admin') {
       await kv.put(categoryKey(finalCard.category), JSON.stringify(idx));
     }
   }
-  return { id: slug, status: 'verified', version: newVersion };
+  return { id: slug, status: finalStatus, version: newVersion };
 }
 
 /**

@@ -285,37 +285,44 @@ export function autoAudit(card) {
 
 /**
  * 列出已入库词条（verified 状态）
+ * 实现：用 alias 反查主键，绕过 kv.list 的边缘缓存
  */
 export async function listVerified(kv, limit = 100, cursor = null) {
-  const list = await kv.list({ prefix: 'kb:', limit, cursor });
-  const keys = list.keys || list || [];
-  const items = [];
-  const seen = new Set(); // 按 id 去重，防止历史/孤儿造成重复显示
-  for (const item of keys) {
-    // 跳过非主键（别名/索引/待审/历史）
-    if (item.name.startsWith('kb:alias:') || item.name.startsWith('kb:idx:') ||
-        item.name.startsWith('kb:pending') || item.name.startsWith('kb:hist:')) continue;
+  // 1. 列出所有 alias（每个词条 title 和每个别名都有一个 alias key）
+  const aliasList = await kv.list({ prefix: 'kb:alias:', limit: 1000 });
+  const aliasKeys = aliasList.keys || aliasList || [];
+  // 2. 收集去重后的主键 slug
+  const slugSet = new Set();
+  for (const a of aliasKeys) {
     try {
-      const raw = await kv.get(item.name);
-      if (!raw) continue;
-      const card = JSON.parse(raw);
-      if (card.status === 'verified' || card.status === 'auto_verified') {
-        const id = card.id || item.name.replace(/^kb:/, '');
-        if (seen.has(id)) continue;
-        seen.add(id);
-        items.push({
-          id,
-          title: card.title,
-          category: card.category || 'auto',
-          status: card.status,
-          version: card.version || 1,
-          updated_at: card.updated_at || '',
-          fact_count: Array.isArray(card.facts) ? card.facts.length : 0,
-        });
-      }
+      const v = await kv.get(a.name);
+      if (v) slugSet.add(v);
     } catch {}
   }
-  return { items, list_complete: list.list_complete !== false, cursor: list.cursor || null };
+  // 3. 对每个主键 get 真实数据
+  const items = [];
+  const seen = new Set();
+  for (const slug of slugSet) {
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    if (items.length >= limit) break;
+    try {
+      const raw = await kv.get('kb:' + slug);
+      if (!raw) continue;
+      const card = JSON.parse(raw);
+      if (card.status !== 'verified' && card.status !== 'auto_verified') continue;
+      items.push({
+        id: card.id || slug,
+        title: card.title,
+        category: card.category || 'auto',
+        status: card.status,
+        version: card.version || 1,
+        updated_at: card.updated_at || '',
+        fact_count: Array.isArray(card.facts) ? card.facts.length : 0,
+      });
+    } catch {}
+  }
+  return { items, list_complete: true, cursor: null };
 }
 
 /**

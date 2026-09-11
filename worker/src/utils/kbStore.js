@@ -1,6 +1,6 @@
 // FACT_KB 知识库读写 + 别名/分类索引
 
-import { cacheGet, cacheSet, cacheDelete, kbCacheKey, KB_CACHE_TTL } from './cache.js';
+import { cacheGet, cacheSet, cacheDelete, kbCacheKey, KB_CACHE_TTL, clearKBCache } from './cache.js';
 
 /**
  * 生成词条主键
@@ -417,6 +417,9 @@ export async function deleteEntry(kv, slug) {
       await kv.delete(p.name);
     }
   }
+  // 清空所有 KB 查询缓存——用户查询时的缓存 key 基于输入原文哈希，
+  // 无法逐个精确删除，直接清全部 kbcache: 最安全
+  await clearKBCache(kv);
   return { deleted: slug };
 }
 

@@ -14,8 +14,8 @@ export async function handleHealth(request, env) {
       timestamp: new Date().toISOString(),
       llm: env.LLM_MODEL || 'Qwen/Qwen2.5-72B-Instruct',
       kv: kvStatus,
-      sources: ['brave', 'ctext', 'zdic', 'gushiwen', 'govDirect'],
-      brave_configured: !!env.BRAVE_API_KEY,
+      sources: ['tavily', 'ctext', 'zdic', 'gushiwen', 'govDirect'],
+      tavily_configured: !!env.TAVILY_KEY,
       siliconflow_configured: !!env.SILICONFLOW_KEY,
     },
   }, 200, request);

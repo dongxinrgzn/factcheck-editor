@@ -1,0 +1,8 @@
+# 本地开发 Secret 模板
+# 复制为 .dev.vars 后填入实际值
+# 生产环境用 npx wrangler secret put XXX 设置
+
+SILICONFLOW_KEY=sk-你的SiliconFlow密钥
+WORKER_KEY=管理员密码
+BRAVE_API_KEY=你的BraveSearch密钥
+KB_CURATOR_PASSWORD=知识库审核员密码

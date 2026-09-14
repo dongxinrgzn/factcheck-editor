@@ -1,0 +1,19 @@
+{
+  "name": "factcheck-editor-api",
+  "version": "1.0.0",
+  "description": "编辑校次事实核查助手 - Cloudflare Worker 后端",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "login": "wrangler login",
+    "kv:create": "wrangler kv namespace create",
+    "secret": "wrangler secret put"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.17"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

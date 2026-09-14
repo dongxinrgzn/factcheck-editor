@@ -1,0 +1,35 @@
+{
+  "_comment": "官方域名白名单 - 季度更新源。用于官方性评分算法（officialScore.js）和 Brave Search site: 过滤。",
+  "_update_guide": "每季度末核对各站点是否仍可访问、是否有新增部委域名，更新后同步到 wrangler.toml 的 OFFICIAL_WHITELIST 变量。",
+  "whitelist": [
+    "stats.gov.cn",
+    "data.stats.gov.cn",
+    "nfga.gov.cn",
+    "moe.gov.cn",
+    "gov.cn",
+    "openstd.samr.gov.cn",
+    "baike.baidu.com",
+    "zh.wikipedia.org",
+    "www.gov.cn",
+    "www.nfga.gov.cn",
+    "www.moe.gov.cn"
+  ],
+  "categories": {
+    "国家统计": ["stats.gov.cn", "data.stats.gov.cn"],
+    "政府": ["gov.cn", "www.gov.cn"],
+    "教育": ["moe.gov.cn", "www.moe.gov.cn"],
+    "林草/生物": ["nfga.gov.cn", "www.nfga.gov.cn"],
+    "标准": ["openstd.samr.gov.cn"],
+    "百科（半官方）": ["baike.baidu.com", "zh.wikipedia.org"]
+  },
+  "scoring": {
+    "tld_gov_cn": 1.0,
+    "tld_edu_cn": 1.0,
+    "tld_org_cn": 0.7,
+    "tld_com": 0.3,
+    "whitelist_bonus": 0.2,
+    "primary_source_bonus": 0.1,
+    "penalty_keywords": ["百度知道", "知乎", "博客园", "csdn", "论坛", "bbs", "blog"],
+    "official_tag_threshold": 0.7
+  }
+}

@@ -669,6 +669,19 @@ body {
         html += '<div class="correction-box"><strong>疑似讹字：</strong>' +
           escapeHtml(JSON.stringify(data.suspected_err)) + '</div>';
       }
+      // 诗词库命中卡片（内置唐诗三百首/宋词三百首/诗经）
+      if (data.poem) {
+        var pm = data.poem;
+        var modeCn = pm.mode === 'title' ? '标题匹配' : (pm.mode === 'fuzzy' ? '模糊匹配' : '内容匹配');
+        html += '<div class="report-section" style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;">' +
+          '<span class="tag-official" style="background:#2e7d32;color:#fff;">诗词库·' + escapeHtml(pm.collection || '') + '</span>' +
+          ' <strong>《' + escapeHtml(pm.title) + '》</strong>' +
+          '<span style="font-size:12px;color:#666;margin-left:6px;">' + escapeHtml(pm.author || '佚名') +
+          (pm.chapter ? ' · ' + escapeHtml(pm.chapter) : '') + '（' + escapeHtml(modeCn) + '）</span>' +
+          '<div style="margin-top:6px;white-space:pre-wrap;line-height:1.8;">' + escapeHtml(pm.text || '') + '</div>' +
+          (pm.mode === 'fuzzy' ? '<div class="correction-box" style="margin-top:6px;">用户文本与内置版本存在个别字差异（常见于流传版本不同），请以上方诗词库原文核对。</div>' : '') +
+          '</div>';
+      }
       html += data.matches.map(function(m) {
         var conf = m.confidence != null ? (m.confidence * 100).toFixed(0) + '%' : '?';
         return '<div class="report-section">' +

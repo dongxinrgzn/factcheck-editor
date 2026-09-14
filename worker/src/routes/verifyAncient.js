@@ -7,6 +7,7 @@ import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL, clearKBCache } from '
 import { searchText, searchClassic, CLASSIC_TEXTS } from '../sources/ctext.js';
 import { searchZdic } from '../sources/zdic.js';
 import { searchGushiwen, extractPoemQuery } from '../sources/gushiwen.js';
+import { lookupPoem } from '../sources/poetryDb.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
 import { submitDraft, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
@@ -110,7 +111,26 @@ export async function handleVerifyAncient(request, env) {
     }
   }
 
-  // 4. 古诗文网（诗词优先）+ 汉典兜底
+  // 4. 诗词库（内置 KV 数据集）优先于古诗文网：命中即得权威全文，
+  //    且不再消耗古诗文网抓取的子请求。未命中走原兜底链路。
+  let poemHit = null;
+  try {
+    poemHit = await lookupPoem(env, text);
+  } catch { /* 诗词库失败不阻塞 */ }
+  if (poemHit) {
+    const e = poemHit.entry;
+    allMatches.push({
+      book: `${e.t}（${e.a || '佚名'}·${e.c}${e.ch ? '·' + e.ch : ''}）`,
+      chapter: '',
+      urn: '',
+      // 内置数据集引用链接（github.com 域名计入 autoAudit 的独立域名门槛）
+      url: 'https://github.com/jackeyGao/chinese-poetry',
+      text: (e.p || []).join('\n'),
+      edition: 'poetry-db',
+    });
+  }
+
+  // 5. 古诗文网（诗词优先）+ 汉典兜底
   if (allMatches.length === 0) {
     try {
       const gw = await searchGushiwen(text, env);
@@ -128,7 +148,7 @@ export async function handleVerifyAncient(request, env) {
     } catch {}
   }
 
-  // 4. 去重
+  // 6. 去重
   const seen = new Set();
   allMatches = allMatches.filter(m => {
     const k = `${m.book}-${m.chapter}-${(m.text || '').slice(0, 20)}`;
@@ -171,8 +191,8 @@ export async function handleVerifyAncient(request, env) {
         source: {
           name: bestMatch.book || bestMatch.edition || '',
           url: bestMatch.url || '',
-          official_tag: bestMatch.edition === 'ctext',
-          official_score: bestMatch.edition === 'ctext' ? 0.9 : 0.5,
+          official_tag: bestMatch.edition === 'ctext' || bestMatch.edition === 'poetry-db',
+          official_score: (bestMatch.edition === 'ctext' || bestMatch.edition === 'poetry-db') ? 0.9 : 0.5,
         },
         verified_at: new Date().toISOString().slice(0, 10),
         confidence: confidence,
@@ -180,8 +200,8 @@ export async function handleVerifyAncient(request, env) {
       references: clustered.slice(0, 5).map(m => ({
         name: `${m.book || ''}${m.chapter ? ' · ' + m.chapter : ''}`,
         url: m.url || '',
-        official_tag: m.edition === 'ctext',
-        official_score: m.edition === 'ctext' ? 0.9 : 0.5,
+        official_tag: m.edition === 'ctext' || m.edition === 'poetry-db',
+        official_score: (m.edition === 'ctext' || m.edition === 'poetry-db') ? 0.9 : 0.5,
       })),
       confidence_tier: confidence,
     };
@@ -250,9 +270,21 @@ export async function handleVerifyAncient(request, env) {
     all_low_confidence: allLow,
     // 分类：诗词类文本（古籍库无诗词集）给明确提示，而非静默"疑似讹误"
     poem_title: extractPoemQuery(text),
+    // 诗词库命中详情（前端渲染专属卡片）
+    poem: poemHit ? {
+      title: poemHit.entry.t,
+      author: poemHit.entry.a || '佚名',
+      collection: poemHit.entry.c,
+      chapter: poemHit.entry.ch || '',
+      text: (poemHit.entry.p || []).join('\n'),
+      mode: poemHit.mode,
+      sim: Number(poemHit.sim.toFixed(2)),
+    } : null,
     note: allLow
       ? (isPoem(text)
-          ? '未在古籍库中找到出处（内置古籍库仅含先秦/哲学/算学七部，不含诗词集）。下方"事实核查"已对文本中各事实点逐条验证。'
+          ? (poemHit
+              ? '诗词库已匹配到相近作品，但比对相似度未达高可信标准（可能是版本差异或引文有出入）。下方"事实核查"已对文本中各事实点逐条验证。'
+              : '未在古籍库和内置诗词库中找到出处（诗词库现收唐诗三百首/宋词三百首/诗经约950篇）。下方"事实核查"已对文本中各事实点逐条验证。')
           : '未找到精确匹配，疑似讹误/辑佚')
       : '',
     classic_books: CLASSIC_TEXTS.map(b => b.label),

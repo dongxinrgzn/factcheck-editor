@@ -3,6 +3,10 @@
 const DEFAULT_TTL = 30 * 24 * 60 * 60;          // 30 天
 const ANCIENT_TTL = 90 * 24 * 60 * 60;          // 古籍原文 90 天
 const KB_CACHE_TTL = 24 * 60 * 60;              // 知识库命中缓存 1 天
+// 网页检索结果缓存 1 天：检索源时好时坏（DDG 反爬/SearXNG 实例失效/维基抖动），
+// 30 天 TTL 会把某次"只剩官方站"的退化结果固化近一个月（踩过：维基结果消失、
+// 只剩林业局官网）。1 天足以抗抖动，又不会固化退化状态。
+const SEARCH_TTL = 24 * 60 * 60;
 
 /**
  * 生成检索缓存 key
@@ -118,4 +122,4 @@ function simpleHash(str) {
   return Math.abs(h).toString(36);
 }
 
-export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL };
+export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL, SEARCH_TTL };

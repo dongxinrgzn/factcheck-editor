@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, searchCacheKey } from '../utils/cache.js';
+import { cacheGet, cacheSet, searchCacheKey, SEARCH_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchAll } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -54,8 +54,8 @@ export async function handleSearch(request, env) {
       const searxResults = await braveSearch({
         query, preferOfficial: true, topK: top_k, whitelist,
       });
-      // 官方真实结果优先排前，维基/其他来源其后
-      results = [...govResults, ...searxResults];
+      // 官方真实结果优先排前（最多 3 条，防低相关 gov 噪音淹没维基等来源），维基/其他来源其后
+      results = [...govResults.slice(0, 3), ...searxResults];
     } catch {
       results = govResults;
     }
@@ -70,7 +70,7 @@ export async function handleSearch(request, env) {
 
   // 打官方性标签
   const annotated = annotateResults(results, env);
-  await cacheSet(env.FACT_CACHE, cacheK, annotated);
+  await cacheSet(env.FACT_CACHE, cacheK, annotated, SEARCH_TTL);
 
   return jsonResponse({
     ok: true,

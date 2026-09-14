@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, searchCacheKey, clearKBCache } from '../utils/cache.js';
+import { cacheGet, cacheSet, searchCacheKey, clearKBCache, SEARCH_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -494,7 +494,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           }
         } catch {}
       }
-      await cacheSet(env.FACT_CACHE, cacheK, searchResults);
+      await cacheSet(env.FACT_CACHE, cacheK, searchResults, SEARCH_TTL);
     }
   } catch {
     searchResults = [];
@@ -505,8 +505,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     try {
       const govRaw = await searchGovDirect(entity || searchQuery, { apiKey: env.TAVILY_KEY });
       const govAnnotated = annotateResults(govRaw, env);
-      // 官方结果排前合并
-      searchResults = [...govAnnotated, ...(Array.isArray(searchResults) ? searchResults : [])];
+      // 官方真实结果优先排前（最多 3 条）——govDirect 走 Tavily site:gov.cn，
+      // 召回噪音多（"机器人大会"正文提一嘴大熊猫也会进），全部置顶会把
+      // 维基等更相关的来源挤到列表尾部看不见（"只剩林业局"的成因之一）
+      searchResults = [...govAnnotated.slice(0, 3), ...(Array.isArray(searchResults) ? searchResults : [])];
       // 相关性过滤：剔除只在正文顺带提及实体的无关词条（如查"大熊猫"却召回"犬/郊狼/柳江人"）
       // 用纯实体词（去掉体重/身高等属性词），避免"大熊猫 身高"这类不连续串误杀
       const relEntity = entityTermOf(entity && entity.length >= 2 ? entity : text.trim());
@@ -786,7 +788,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           }
         }
         const annotated = annotateResults(raw, env);
-        if (annotated.length > 0) await cacheSet(env.FACT_CACHE, cacheK, annotated);
+        if (annotated.length > 0) await cacheSet(env.FACT_CACHE, cacheK, annotated, SEARCH_TTL);
         return { claim: c, query: sq, results: annotated, cached: false, fromKB: false };
       } catch (e) {
         return { claim: c, query: sq, results: [], cached: false, error: e.message };

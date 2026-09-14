@@ -4,7 +4,7 @@
 // - 有结果：返回官方站点的真实文章（标题/摘要/链接），URL 为 gov.cn/edu.cn，自动打★官方
 // - 无结果：不返回任何内容（避免"点开空白/0结果"的无效入口）
 
-import { ddgSiteSearch, bingSiteSearch, searxSiteSearch, ddgSearch, tavilySearch } from './brave.js';
+import { bingSiteSearch, bingWebSearch, tavilySearch } from './brave.js';
 
 // 判断 URL 是否为政府/教育官方域名
 function isOfficialHost(url) {
@@ -79,10 +79,11 @@ export async function searchGovDirect(query, opts = {}) {
   }
 
   // 兜底通道：免费爬取（仅当 Tavily 无 key 或结果不足时）
+  // 注：SearXNG 公共实例与 DDG 已被反爬/失效，兜底只用 Bing（实测可用）
   if (hits.length < 3) {
     let globalHits = [];
     try {
-      const g = await ddgSearch(query, 18);
+      const g = await bingWebSearch(query, 18);
       globalHits = g.filter(r => isOfficialHost(r.url))
         .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
     } catch { /* ignore */ }
@@ -91,19 +92,8 @@ export async function searchGovDirect(query, opts = {}) {
     if (globalHits.length < 4) {
       const per = await Promise.all(
         OFFICIAL_DOMAINS.map(async ({ domain }) => {
-          const sx = await searxSiteSearch(domain, query, perDomain).catch(() => []);
-          if (sx.length >= 3) return sx;
           const bing = await bingSiteSearch(domain, query, perDomain).catch(() => []);
-          let merged = mergeByUrl(sx, bing);
-          if (merged.length < 3) {
-            let ddg = await ddgSiteSearch(domain, query, perDomain).catch(() => []);
-            if (ddg.length === 0) {
-              await new Promise(r => setTimeout(r, 600));
-              ddg = await ddgSiteSearch(domain, query, perDomain).catch(() => []);
-            }
-            merged = mergeByUrl(merged, ddg);
-          }
-          return merged;
+          return bing;
         })
       );
       siteHits = per.flat()

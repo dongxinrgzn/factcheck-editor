@@ -313,7 +313,7 @@ async function wikiEnSupplement(zhTitle, hint) {
   } catch { return null; }
 }
 
-async function wikiSearch(query, topK = 5, hint = '') {
+export async function wikiSearch(query, topK = 5, hint = '') {
   const out = [];
   // 维基全文检索只按实体词搜；属性词（体重/身高）仅用于 hint 数据抽取，
   // 避免按属性词召回所有含体型数据的无关词条（犬/郊狼/柳江人…）
@@ -367,17 +367,27 @@ async function wikiSearch(query, topK = 5, hint = '') {
 }
 
 // ---------- DuckDuckGo HTML ----------
+// DDG 熔断器：html.duckduckgo.com 常被反爬挡住（返回验证页/超时），
+// 失败后 10 分钟内直接跳过，避免每次检索都白等超时；到期自动重试恢复。
+let _ddgDownUntil = 0;
+const DDG_COOLDOWN_MS = 10 * 60 * 1000;
+
 export async function ddgSearch(query, topK = 5) {
+  if (topK <= 0) return []; // 维基已给满额时勿空跑 DDG——白等超时
+  if (Date.now() < _ddgDownUntil) return []; // 熔断中
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
+    const t = setTimeout(() => ctrl.abort(), 5000); // DDG 常被反爬挡住，长超时只会白等
     const resp = await fetch(url, {
       signal: ctrl.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
     });
     clearTimeout(t);
-    if (!resp.ok) return [];
+    if (!resp.ok) {
+      _ddgDownUntil = Date.now() + DDG_COOLDOWN_MS; // 触发熔断
+      return [];
+    }
     const html = await resp.text();
 
     const out = [];
@@ -407,8 +417,12 @@ export async function ddgSearch(query, topK = 5) {
         source: 'duckduckgo',
       });
     }
+    // 200 但 0 结果 = 典型反爬验证页，同样视为不可用
+    if (out.length === 0) _ddgDownUntil = Date.now() + DDG_COOLDOWN_MS;
+    else _ddgDownUntil = 0; // 成功则解除熔断
     return out;
   } catch {
+    _ddgDownUntil = Date.now() + DDG_COOLDOWN_MS; // 超时/网络错误 → 熔断
     return [];
   }
 }
@@ -475,6 +489,48 @@ function decodeBingUrl(href) {
   return href;
 }
 
+/**
+ * Bing 通用网页搜索（HTML 抓取，无需 API Key）
+ * DDG/SearXNG 相继被反爬或实例失效后的免费兜底源。
+ * @returns {Promise<Array<{title,url,snippet}>>}
+ */
+export async function bingWebSearch(query, topK = 5) {
+  try {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN&count=${Math.max(topK * 3, 15)}`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+    });
+    clearTimeout(t);
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const blocks = html.split(/<li class="b_algo"/).slice(1);
+    const out = [];
+    for (const blk of blocks) {
+      const linkM = blk.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      if (!linkM) continue;
+      const realUrl = decodeBingUrl(linkM[1]);
+      let snippet = '';
+      const capM = blk.match(/<div class="b_caption"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
+      if (capM) snippet = stripHtml(capM[1]);
+      if (!snippet) {
+        const pM = blk.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+        if (pM) snippet = stripHtml(pM[1]);
+      }
+      out.push({ title: stripHtml(linkM[2]), url: realUrl, snippet });
+      if (out.length >= topK) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function bingSiteSearch(domain, query, topK = 5) {
   try {
     const q = `site:${domain} ${query}`;
@@ -520,7 +576,7 @@ export async function bingSiteSearch(domain, query, topK = 5) {
 }
 
 // ---------- SearXNG（末选） ----------
-async function searxSearch(query, topK = 5) {
+export async function searxSearch(query, topK = 5) {
   for (const instance of SEARX_INSTANCES) {
     try {
       const params = new URLSearchParams({ q: query, format: 'json', language: 'zh' });
@@ -641,16 +697,17 @@ async function diversifyDomains(results, query, topK, tavilyApiKey) {
   if (!query) return results;
 
   const extra = [];
-  // 先试 DDG（无需密钥，价位最低）
-  try {
-    const ddg = await ddgSearch(query, topK + 3);
-    for (const r of ddg) if (r?.url) extra.push(r);
-  } catch { /* 忽略 */ }
-  // 仍单一域名 → 再试 Tavily（若配置了密钥）
-  if (hostSetOf([...results, ...extra]).size < 2 && tavilyApiKey) {
+  // 多样性补充：Tavily（有 key）→ Bing（免费兜底）。DDG/SearXNG 已从主链路移除。
+  if (tavilyApiKey) {
     try {
       const tv = await tavilySearch(query, { apiKey: tavilyApiKey, topK: topK + 3, searchDepth: 'basic' });
       for (const r of tv.results || []) if (r?.url) extra.push(r);
+    } catch { /* 忽略 */ }
+  }
+  if (hostSetOf([...results, ...extra]).size < 2) {
+    try {
+      const bing = await bingWebSearch(query, topK + 3);
+      for (const r of bing) if (r?.url) extra.push(r);
     } catch { /* 忽略 */ }
   }
   // 上游已有域名清一色时，优先让"新域名"的结果排在前面（否则 slice 截断会
@@ -671,31 +728,35 @@ function hostOf(r) {
 
 /**
  * 综合全网检索（多源兜底）
- * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey }
+ *
+ * 主链路（2026-09 重构）：维基 → Bing → Tavily。
+ * DDG html 端与 SearXNG 公共实例已被反爬/失效（探针实测 0 结果），
+ * 从主链路移除；Bing HTML 抓取实测可用（~200ms）且无需 API Key。
+ * ddgSearch/searxSearch 函数仍保留——govDirect 兜底通道与健康探针在用。
+ *
+ * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey, diversify }
  *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
  */
 export async function braveSearch(opts = {}) {
   const { query, topK = 5, hint = '', tavilyApiKey, diversify = true } = opts;
   if (!query) return [];
 
-  // 维基 → DDG → SearXNG，任一源有结果即返回（合并去重）
+  // 1. 维基（权威来源 + 深度抽取属性数据句）
   const wiki = await wikiSearch(query, topK, hint);
   if (wiki.length > 0) {
-    const ddg = await ddgSearch(query, Math.max(0, topK - wiki.length));
-    let merged = dedupe([...wiki, ...ddg]);
-    // 域名多样性兜底：维基命中时上面会直接返回，导致结果常常清一色 zh.wikipedia.org。
-    // 而自动入库门槛要求「≥2 个独立域名」，单一域名会让高可信事实永远过不了审
-    // （表现为"明明判高却不出入库提示"）。这里在域名单一时补一轮全网检索凑多样性。
-    // diversify=false 用于子请求额度紧张的复合流程（如古文查证）。
+    let merged = dedupe([...wiki]);
+    // 域名多样性兜底：维基结果常清一色 zh.wikipedia.org，而自动入库门槛要求
+    // 「≥2 个独立域名」，单一域名会让高可信事实永远过不了审。域名单一时
+    // 补 Bing/Tavily 凑多样性。diversify=false 用于子请求额度紧张的复合流程。
     if (diversify) merged = await diversifyDomains(merged, query, topK, tavilyApiKey);
     return merged.slice(0, topK);
   }
-  const ddg = await ddgSearch(query, topK);
-  if (ddg.length > 0) return ddg.slice(0, topK);
-  const searx = await searxSearch(query, topK);
-  if (searx.length > 0) return searx;
 
-  // 兜底：Tavily 全网搜索（当 Wikipedia/DDG/SearXNG 全部失败时）
+  // 2. 维基无结果 → Bing（免费、快）
+  const bing = await bingWebSearch(query, topK);
+  if (bing.length > 0) return bing.slice(0, topK);
+
+  // 3. Bing 也无结果 → Tavily（付费，最后兜底）
   if (tavilyApiKey) {
     try {
       const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'basic' });

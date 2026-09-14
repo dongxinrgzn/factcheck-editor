@@ -49,7 +49,7 @@ async function mapLimit(items, limit, fn) {
  *
  * @returns {Promise<{results:Array, info:Object}|null>}
  */
-async function lookupKBForClaim(env, claim, entity) {
+export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
   if (!env.FACT_KB) return null;
   const probes = [];
   if (entity) probes.push(entity);
@@ -57,6 +57,16 @@ async function lookupKBForClaim(env, claim, entity) {
   if (sq && sq !== entity) probes.push(sq);
   const claimText = (claim.claim || '').trim();
   if (claimText) probes.push(claimText);
+
+  // 属性词：查询模式来自 LLM 解析的 hint，逐点核查来自断言的 metric。
+  // 有属性词时必须匹配到对应事实才算命中——否则词条存在但答非所问
+  //（反例：查"大熊猫 身高"，词条里只有体重/脑容量，facts[0] 兜底会把
+  //  脑容量数据当身高答案返回）。
+  const metric = String(hint || claim.metric || '').trim();
+  // 宽松兜底（取词条第一条事实）必须同时满足：
+  //   调用方显式允许（仅查询整段路径）且本次查询无属性词（纯实体查询）。
+  // 逐点核查路径永不宽松——断言必须由对应事实支撑。
+  const allowLoose = !!opts.loose && !metric;
 
   for (const probe of probes) {
     if (!probe || probe.length < 2) continue;
@@ -70,16 +80,32 @@ async function lookupKBForClaim(env, claim, entity) {
     const facts = Array.isArray(card.facts) ? card.facts : [];
     if (facts.length === 0) continue;
 
-    // 从词条事实中挑与断言最相关的一条：优先 label 命中，其次 value 含断言数值
+    // 从词条事实中挑与断言最相关的一条：
+    // ① label 与属性词互相包含 → ② label 与断言文本互相包含 → ③ value 含断言数值
+    // → ④（仅纯实体查询）取第一条。全部不中 → 视为未命中（走全网检索），
+    //    宁可多花一次检索，也不能拿无关事实冒充答案。
     const nums = (claimText.match(/\d+(?:\.\d+)?/g) || []);
-    let best = facts.find(f => {
-      const lbl = (f.label || '');
-      return lbl && (claimText.includes(lbl) || lbl.includes(claimText));
-    });
+    let best = null;
+    if (metric) {
+      best = facts.find(f => {
+        const lbl = (f.label || '').trim();
+        return lbl && metric.length >= 2 &&
+          (lbl.includes(metric) || metric.includes(lbl));
+      });
+    }
+    if (!best) {
+      best = facts.find(f => {
+        const lbl = (f.label || '');
+        return lbl && (claimText.includes(lbl) || lbl.includes(claimText));
+      });
+    }
     if (!best && nums.length > 0) {
       best = facts.find(f => nums.some(n => (f.value || '').includes(n)));
     }
-    if (!best) best = facts[0];
+    if (!best) {
+      if (!allowLoose) continue;
+      best = facts[0];
+    }
 
     const isManual = card.status === 'verified';
     const kbSource = {
@@ -383,12 +409,46 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 查询/查证都先查 KB：命中则直接把 KB 词条当作"检索结果"，
   // 跳过全网检索，并在返回里标记 kbHit，供前端显示"来自知识库"。
   // 注意：整段文本先查一次；逐点断言级的 KB 查询在下方 checkSearches 里做。
-  let wholeKbHit = null;
   if (intent === 'query') {
+    let wholeKbHit = null;
     try {
-      const kb = await lookupKBForClaim(env, { claim: text, entity: entity || text }, entity);
-      if (kb) wholeKbHit = kb;
+      // loose 仅在无属性词（纯实体查询）时生效：词条存在即可取首条事实展示；
+      // 带属性词的查询（如"大熊猫 身高"）必须匹配到对应事实，否则走全网检索。
+      wholeKbHit = await lookupKBForClaim(env, { claim: text, entity: entity || text }, entity, hint, { loose: true });
     } catch { wholeKbHit = null; }
+
+    // KB 命中：直接以知识库内容作答——在此提前返回，
+    // 跳过下方全部检索（维基/govDirect/Tavily），延迟从 10s+ 降到一次 LLM 解析。
+    if (wholeKbHit) {
+      const info = wholeKbHit.info || {};
+      const kbCard = {
+        title: info.title || entity || '',
+        facts: [{
+          key: 'fact_0',
+          label: info.factLabel || entity || '',
+          value: info.factValue || '',
+          rating: 'high',
+          source: { name: `${info.title}（知识库）`, url: wholeKbHit.results[0]?.url || '', official_tag: true, official_score: 0.9 },
+          verified_at: info.updatedAt || '',
+          confidence: 'high',
+        }],
+        references: wholeKbHit.results.slice(1).map(r => ({ name: r.title, url: r.url, official_score: r.official_score || 0.85 })),
+      };
+      return {
+        intent: 'query',
+        factCard: kbCard,
+        answer: `${info.factLabel || ''}：${info.factValue || ''}`,
+        confidence: '高',
+        confidenceReason: `来自知识库（${info.auditLabel || '已审核'}，共 ${info.factCount || 0} 条事实）`,
+        ratings: [],
+        searches: [{ claim: { claim: text, entity: entity || '' }, query: entity || text, results: wholeKbHit.results, kb: info, fromKB: true }],
+        kbHit: true,
+        kbInfo: info,
+        kbCount: 1,
+        draftCard: null,
+        autoStored: false,
+      };
+    }
   }
 
   let searchResults = null;
@@ -466,39 +526,25 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
   // ---------- 分支 A：查询模式 → 百科卡片 + 直接解答 + 可信度 ----------
   if (intent === 'query') {
-    // KB 命中：直接以知识库内容作答，不再调用 LLM/全网检索
-    if (wholeKbHit) {
-      const info = wholeKbHit.info || {};
-      const kbCard = {
-        title: info.title || entity || '',
-        facts: [{
-          key: 'fact_0',
-          label: info.factLabel || entity || '',
-          value: info.factValue || '',
-          rating: 'high',
-          source: { name: `${info.title}（知识库）`, url: wholeKbHit.results[0]?.url || '', official_tag: true, official_score: 0.9 },
-          verified_at: info.updatedAt || '',
-          confidence: 'high',
-        }],
-        references: wholeKbHit.results.slice(1).map(r => ({ name: r.title, url: r.url, official_score: r.official_score || 0.85 })),
-      };
-      return {
-        intent: 'query',
-        factCard: kbCard,
-        answer: `${info.factLabel || ''}：${info.factValue || ''}`,
-        confidence: '高',
-        confidenceReason: `来自知识库（${info.auditLabel || '已审核'}，共 ${info.factCount || 0} 条事实）`,
-        ratings: [],
-        searches: [{ claim: { claim: text, entity: entity || '' }, query: entity || text, results: wholeKbHit.results, kb: info, fromKB: true }],
-        kbHit: true,
-        kbInfo: info,
-        kbCount: 1,
-        draftCard: null,
-        autoStored: false,
-      };
-    }
+    // （KB 命中已在上方提前返回，此处为未命中走全网检索的路径）
 
     const factCard = buildFactCard(searchResults, entity || text.trim(), text);
+
+    // 带属性词的查询：把数据卡过滤到只留与属性相关的数据句。
+    // 否则问"大熊猫 身高"，卡片里塞满脑容量/排便等无关句——观感即"答非所问"，
+    // 且用户点手动入库会把无关句存进词条。近义词表从严维护，
+    // 防假阳性（如"粪便重量约100克"混进体重查询）。
+    if (hint) {
+      const ATTR_SYNONYMS = {
+        '身高': ['体长', '身长', '肩高', '体高', '头躯长'],
+        '体长': ['身高', '身长', '肩高'],
+        '人口': ['总人口', '人口数'],
+        '面积': ['占地', '总面积', '幅员'],
+      };
+      const keys = [hint, ...(ATTR_SYNONYMS[hint] || [])];
+      const rel = (s) => keys.some(k => String(s || '').includes(k));
+      factCard.facts = factCard.facts.filter(f => rel(f.property) || rel(f.value));
+    }
 
     // 基于原始检索结果，让 LLM 直接提取数据并生成解答。
     // 把所有检索结果的原始摘要喂给 LLM，不做任何关键词/正则过滤——LLM 自行理解、提取、分类。
@@ -536,7 +582,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
                 '3. 年份、地区必须与问题一致；',
                 '4. 英文单位换算要准确：trillion=万亿，billion=十亿，million=百万；',
                 '5. 数值忠实于来源，不要编造；',
-                '6. 理解近义表述：身高≈体长/头躯长，体重=重量，面积=占地，人口=人口数/总人口。摘要用近义词描述同一指标时视为有直接数据。',
+                '6. 理解近义表述：身高≈体长/头躯长/肩高/臀高（动物"身高"即肩高），体重=重量，面积=占地，人口=人口数/总人口。摘要用近义词描述同一指标时视为有直接数据。',
                 '可信度判定：多个独立来源同一指标数据一致→"高"；仅单一来源或约数→"中"；数据缺失或矛盾→"低"。',
                 '只输出 JSON：{"answer":"一句话直接解答","confidence":"高或中或低","reason":"说明依据"}',
               ].join('\n'),
@@ -558,13 +604,26 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       } catch { /* LLM 失败则只展示数据卡片 */ }
     }
 
+    // 兜底：带属性词的查询，LLM 说"未检索到"（confidence 低）但数据卡里
+    // 实际有属性相关的数据句（LLM 偶尔漏认近义指标，如把"肩高"不当"身高"）
+    // → 直接用数据句作答，降为中可信度。真没有相关数据句时不触发（保持如实告知）。
+    if (hint && confidence === '低' && factCard.facts.length > 0) {
+      const f = factCard.facts[0];
+      answer = f.value || answer;
+      confidence = '中';
+      confidenceReason = `已检索到与「${hint}」相关的数据（${(f.source && f.source.name) || '检索来源'}），供参考`;
+    }
+
     // 查询模式：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
     let queryDraftCard = null;
     let queryAutoStored = false;
     // draftCard 事实来源：优先用 factCard 正则提取的 facts；若为空但 LLM 有高可信度答案，用 LLM 答案构建
+    // label 优先用属性词（hint）：入库后 KB 事实的 label 与属性词对应，
+    // 下次带属性查询（"大熊猫 身高"）才能被 lookupKBForClaim 精确匹配。
+    const draftLabel = () => hint || '';
     const draftFacts = factCard.facts.length > 0
       ? factCard.facts.map(f => ({
-          label: f.property || text.trim(),
+          label: draftLabel() || f.property || text.trim(),
           value: f.value || '',
           rating: 'high',
           source: {
@@ -578,7 +637,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }))
       : (answer && confidence === '高' && searchResults && searchResults.length > 0
         ? [{
-            label: entity || text.trim(),
+            label: draftLabel() || entity || text.trim(),
             value: answer,
             rating: 'high',
             source: {

@@ -80,42 +80,46 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     const facts = Array.isArray(card.facts) ? card.facts : [];
     if (facts.length === 0) continue;
 
-    // 从词条事实中挑与断言最相关的一条：
-    // ① label 与属性词互相包含 → ② label 与断言文本互相包含 → ③ value 含断言数值
-    // → ④（仅纯实体查询）取第一条。全部不中 → 视为未命中（走全网检索），
+    // 从词条事实中挑与属性相关的**全部**事实：
+    // ① label 与任一属性词互相包含（hint 可能是"身高 体重"多属性）→ ② label 与断言文本互相包含
+    // → ③ value 含断言数值 → ④（仅纯实体查询）取第一条。全部不中 → 视为未命中（走全网检索），
     //    宁可多花一次检索，也不能拿无关事实冒充答案。
     const nums = (claimText.match(/\d+(?:\.\d+)?/g) || []);
-    let best = null;
-    if (metric) {
-      best = facts.find(f => {
-        const lbl = (f.label || '').trim();
-        return lbl && metric.length >= 2 &&
-          (lbl.includes(metric) || metric.includes(lbl));
-      });
+    const attrWords = metric
+      ? metric.split(/[\s、,，+/和与及]+/).map(w => w.trim()).filter(w => w.length >= 2)
+      : [];
+    const labelHit = (f, word) => {
+      const lbl = (f.label || '').trim();
+      return lbl && word.length >= 2 && (lbl.includes(word) || word.includes(lbl));
+    };
+    let matched = [];
+    if (attrWords.length > 0) {
+      matched = facts.filter(f => attrWords.some(w => labelHit(f, w)));
     }
-    if (!best) {
-      best = facts.find(f => {
-        const lbl = (f.label || '');
+    if (matched.length === 0 && claimText) {
+      matched = facts.filter(f => {
+        const lbl = (f.label || '').trim();
         return lbl && (claimText.includes(lbl) || lbl.includes(claimText));
       });
     }
-    if (!best && nums.length > 0) {
-      best = facts.find(f => nums.some(n => (f.value || '').includes(n)));
+    if (matched.length === 0 && nums.length > 0) {
+      matched = facts.filter(f => nums.some(n => (f.value || '').includes(n)));
     }
-    if (!best) {
+    if (matched.length === 0) {
       if (!allowLoose) continue;
-      best = facts[0];
+      matched = [facts[0]];
     }
 
     const isManual = card.status === 'verified';
-    const kbSource = {
+    // 每条匹配事实生成一条 KB 检索结果（多属性查询如"身高 体重"全部返回）
+    const kbSources = matched.map(f => ({
       title: `${card.title || '知识库'}（知识库${isManual ? '·人工审核' : '·自动审核'}）`,
-      url: best.source?.url || '',
-      snippet: `【知识库】${best.label || ''}：${best.value || ''}`,
+      url: f.source?.url || '',
+      snippet: `【知识库】${f.label || ''}：${f.value || ''}`,
       source: 'kb',
       official_score: 0.9,
       official_tag: true,
-    };
+    }));
     const refs = Array.isArray(card.references) ? card.references : [];
     const extra = refs.slice(0, 3).map(r => ({
       title: `${card.title || ''}（知识库来源）`,
@@ -126,14 +130,24 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
       official_tag: true,
     })).filter(r => r.url);
 
+    const best = matched[0];
+    // 部分命中提示：问了"身高 体重"但库里只有体重 → 明确告知身高缺失，
+    // 避免用户疑惑"为什么答案里没有身高"
+    const missingAttrs = attrWords.filter(w => !matched.some(f => labelHit(f, w)));
     return {
-      results: [kbSource, ...extra],
+      results: [...kbSources, ...extra],
       info: {
         title: card.title || '',
         status: card.status || '',
         auditLabel: isManual ? '人工审核' : '自动审核',
         factLabel: best.label || '',
         factValue: best.value || '',
+        facts: matched.map(f => ({
+          label: f.label || '',
+          value: f.value || '',
+          url: f.source?.url || '',
+        })),
+        missingAttrs,
         updatedAt: card.updated_at || '',
         factCount: facts.length,
       },
@@ -421,30 +435,37 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 跳过下方全部检索（维基/govDirect/Tavily），延迟从 10s+ 降到一次 LLM 解析。
     if (wholeKbHit) {
       const info = wholeKbHit.info || {};
+      // 多属性查询（"大熊猫 身高 体重"）→ 全部匹配事实都进卡片与解答
+      const kbFacts = (Array.isArray(info.facts) && info.facts.length > 0)
+        ? info.facts
+        : [{ label: info.factLabel || entity || '', value: info.factValue || '', url: wholeKbHit.results[0]?.url || '' }];
       const kbCard = {
         title: info.title || entity || '',
-        facts: [{
-          key: 'fact_0',
-          label: info.factLabel || entity || '',
-          value: info.factValue || '',
+        facts: kbFacts.map((f, i) => ({
+          key: `fact_${i}`,
+          label: f.label || entity || '',
+          value: f.value || '',
           rating: 'high',
-          source: { name: `${info.title}（知识库）`, url: wholeKbHit.results[0]?.url || '', official_tag: true, official_score: 0.9 },
+          source: { name: `${info.title}（知识库）`, url: f.url || '', official_tag: true, official_score: 0.9 },
           verified_at: info.updatedAt || '',
           confidence: 'high',
-        }],
-        references: wholeKbHit.results.slice(1).map(r => ({ name: r.title, url: r.url, official_score: r.official_score || 0.85 })),
+        })),
+        references: wholeKbHit.results.filter(r => r.source !== 'kb').map(r => ({ name: r.title, url: r.url, official_score: r.official_score || 0.85 })),
       };
       return {
         intent: 'query',
         factCard: kbCard,
-        answer: `${info.factLabel || ''}：${info.factValue || ''}`,
+        answer: kbFacts.map(f => `${f.label || ''}：${f.value || ''}`).filter(s => s.trim() !== '：').join('；') +
+          ((info.missingAttrs && info.missingAttrs.length > 0)
+            ? `（${info.missingAttrs.join('、')}：知识库暂无相关事实，可单独查询触发全网检索补充）`
+            : ''),
         confidence: '高',
-        confidenceReason: `来自知识库（${info.auditLabel || '已审核'}，共 ${info.factCount || 0} 条事实）`,
+        confidenceReason: `来自知识库（${info.auditLabel || '已审核'}，命中 ${kbFacts.length} 条相关事实，词条共 ${info.factCount || 0} 条）`,
         ratings: [],
         searches: [{ claim: { claim: text, entity: entity || '' }, query: entity || text, results: wholeKbHit.results, kb: info, fromKB: true }],
         kbHit: true,
         kbInfo: info,
-        kbCount: 1,
+        kbCount: kbFacts.length,
         draftCard: null,
         autoStored: false,
       };
@@ -781,10 +802,14 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 知识库命中的断言：直接用 KB 已审核的事实作答，不再打 LLM 评级
     // （KB 里的内容已经过自动/人工审核，且能省下一次 LLM 调用）
     if (sr.fromKB && sr.kb) {
+      // KB 可能命中多条相关事实（如体重有野生/饲养两条），全部列入依据
+      const kbEvi = (Array.isArray(sr.kb.facts) && sr.kb.facts.length > 0)
+        ? sr.kb.facts.map(f => `${f.label}：${f.value}`).join('；')
+        : `${sr.kb.factLabel}：${sr.kb.factValue}`;
       return {
         claim: sr.claim,
         rating: 'high',
-        evidence: `${sr.kb.factLabel}：${sr.kb.factValue}`,
+        evidence: kbEvi,
         correction: '',
         sources: sr.results,
         fromKB: true,

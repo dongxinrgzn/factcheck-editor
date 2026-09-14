@@ -2,7 +2,7 @@
 
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
-import { submitDraft, approveEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify } from '../utils/kbStore.js';
+import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify } from '../utils/kbStore.js';
 import { clearAllCache, clearKBCache } from '../utils/cache.js';
 import { runCheck } from './check.js';
 
@@ -139,7 +139,17 @@ export async function handleKbSubmit(request, env) {
     const { card } = body;
     if (!card || !card.title) return errorJson('card 字段必填且需要 title', 400, 'BAD_REQUEST', request);
     const slug = card.id || slugify(card.title);
-    const result = await approveEntry(env.FACT_KB, slug, { ...card, status: 'verified', category: '人工' }, isAdmin ? 'admin' : 'curator');
+    // 同名词条 → 合并追加新事实（去重），绝不整卡覆盖——
+    // 否则第二次入库会把第一次的事实全部丢掉（事故：大熊猫身高入库覆盖了体重）
+    const existing = await getEntry(env.FACT_KB, slug);
+    let result;
+    if (existing) {
+      const mr = await mergeEntry(env.FACT_KB, slug, { ...card, status: 'verified' }, isAdmin ? 'admin' : 'curator');
+      result = { ...mr, slug, merged: true, stored: mr.added > 0 };
+    } else {
+      result = await approveEntry(env.FACT_KB, slug, { ...card, status: 'verified', category: '人工' }, isAdmin ? 'admin' : 'curator');
+    }
+    await clearKBCache(env.FACT_KB);
     return jsonResponse({ ok: true, data: { ...result, card, stored: true } }, 200, request);
   }
 

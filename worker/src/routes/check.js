@@ -175,17 +175,24 @@ function buildFactCard(results, entity, queryText = '') {
 export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query' } = {}) {
   const intent = mode === 'verify' ? 'assertion' : 'query';
 
-  // 0. 两种模式共享的：检索（带属性维度 hint）
-  // 先抽属性维度词和实体（如果有的话）
-  const attrM = text.match(ATTR_RE);
-  const hint = attrM ? attrM[1] : '';
-  // 粗略实体提取："大熊猫 体重" → entity="大熊猫"；"鲁迅出生年" → entity="鲁迅"
-  let entity = text.replace(ATTR_RE, '').replace(/[的了是在有？?多少几什么]/g, '').trim();
-  if (hint && !entity) {
-    // 没有实体但有属性词，用户直接问"体重"——需要实体来检索
-    entity = text.replace(hint, '').trim();
-  }
-  const searchQuery = entity ? (hint ? `${entity} ${hint}` : entity) : text.trim();
+  // 0. 两种模式共享的：检索
+  // 用 LLM 理解用户输入，提取实体和属性维度词，不再依赖正则
+  const llmParse = await callLLMJson({
+    messages: [
+      {
+        role: 'system',
+        content: '从用户输入中提取搜索实体和属性维度词，用于搜索引擎检索。输出 JSON：{"entity":"主体名词（去掉属性词和助词）","hint":"属性维度词（如体重/身高/生日/出生/GDP/人口等，没有则为空）","searchQuery":"实体+属性词，空格分隔，适合搜索引擎"}。只输出 JSON。',
+      },
+      { role: 'user', content: `用户输入：${text}` },
+    ],
+    apiKey,
+    temperature: 0.1,
+    maxTokens: 200,
+  }).catch(() => null);
+
+  let entity = (llmParse && llmParse.entity) || text.replace(/[的了是在有？?多少几什么]/g, '').trim();
+  let hint = (llmParse && llmParse.hint) || '';
+  const searchQuery = (llmParse && llmParse.searchQuery) || (entity ? (hint ? `${entity} ${hint}` : entity) : text.trim());
 
   // 外国实体检测：查询含外国国名时追加英文 Tavily 检索（外国数据在英文权威源最全）
   // 这是通用逻辑，不限于 GDP——任何含外国国名的查询都走英文增强
@@ -428,9 +435,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 2. 对每条断言检索证据
   const checkSearches = await Promise.all(
     claims.slice(0, 5).map(async (c) => {
-      const attrM2 = (c.claim || '').match(ATTR_RE);
-      const hint2 = attrM2 ? attrM2[1] : '';
+      // 直接用 LLM 提取的 entity 和 metric，不再依赖正则
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
+      const hint2 = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
       const sq = entity2 ? (hint2 ? `${entity2} ${hint2}` : entity2) : c.claim;
       const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);

@@ -436,6 +436,42 @@ body {
     }).join('');
   }
 
+  // 计算入库提示（内联 HTML + 右下角 toast）。
+  // 必须在 renderReport 开头统一调用：查询模式与"知识库命中"两个分支会提前 return，
+  // 把提示逻辑放在函数末尾会导致最常用的查询模式永远看不到提示。
+  function buildStoreNotice(data) {
+    if (!data || !data.draftCard) return null;
+    state.lastDraftCard = data.draftCard;   // 保存到 state 供手动入库使用
+    var draftTitle = data.draftCard.title || '';
+    if (data.autoStored) {
+      // 右下角提示：自动入库（自动审核）
+      showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + draftTitle });
+      return {
+        html: '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
+          escapeHtml(draftTitle) + '（自动审核）</div>'
+      };
+    }
+    var confLabel = data.confidence || '中';
+    // 右下角提示：可入库/不入库，入库后显示人工审核
+    showToast({
+      type: 'manual',
+      title: '可信度：' + confLabel + '，可选择是否入库',
+      desc: '词条：' + draftTitle,
+      actions: [
+        { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
+        { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
+      ]
+    });
+    return {
+      html: '<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
+        '。词条：' + escapeHtml(draftTitle) +
+        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
+        'onclick="window._manualStore()">入库</button>' +
+        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
+        'onclick="window._skipStore()">不入库</button></div>'
+    };
+  }
+
   // 渲染核查报告
   function renderReport(data) {
     var box = $('report-area');
@@ -443,6 +479,7 @@ body {
       box.innerHTML = '<div class="empty-state">无报告</div>';
       return;
     }
+    var notice = buildStoreNotice(data);   // 副作用：右下角 toast + state.lastDraftCard
 
     // 查询模式 → 百科卡片（直接解答 + 可信度 + 属性数值 + 来源链接）
     if (data.intent === 'query' && data.factCard) {
@@ -489,6 +526,7 @@ body {
         }
         fcHtml += '</div>';
       }
+      if (notice && notice.html) fcHtml += notice.html;
       box.innerHTML = fcHtml;
       return;
     }
@@ -515,7 +553,7 @@ body {
         '<h3>' + escapeHtml(card.title || '') + '</h3>' +
         '<div style="color:#666;font-size:12px;margin-bottom:8px;">分类：' + escapeHtml(card.category || '') +
         ' | 更新：' + escapeHtml(card.updated_at || '') + '</div>' +
-        factsHtml + refsHtml + '</div>';
+        factsHtml + refsHtml + '</div>' + (notice && notice.html ? notice.html : '');
       return;
     }
 
@@ -574,34 +612,8 @@ body {
       }
     }
 
-    if (data.draftCard) {
-      state.lastDraftCard = data.draftCard;  // 保存到 state 供手动入库使用
-      var draftTitle = data.draftCard.title || '';
-      if (data.autoStored) {
-        html += '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
-          escapeHtml(draftTitle) + '（自动审核）</div>';
-        // 右下角提示：自动入库（自动审核）
-        showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + draftTitle });
-      } else {
-        var confLabel = data.confidence || '中';
-        html += '<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
-          '。词条：' + escapeHtml(draftTitle) +
-          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
-          'onclick="window._manualStore()">入库</button>' +
-          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
-          'onclick="window._skipStore()">不入库</button></div>';
-        // 右下角提示：可入库/不入库，入库后显示人工审核
-        showToast({
-          type: 'manual',
-          title: '可信度：' + confLabel + '，可选择是否入库',
-          desc: '词条：' + draftTitle,
-          actions: [
-            { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
-            { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
-          ]
-        });
-      }
-    }
+    // 入库提示（内联）已在函数开头统一计算，避免各分支提前 return 导致漏渲染
+    if (notice && notice.html) html += notice.html;
 
     box.innerHTML = html || '<div class="empty-state">无报告数据</div>';
   }

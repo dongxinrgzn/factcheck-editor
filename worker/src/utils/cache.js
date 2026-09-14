@@ -42,9 +42,12 @@ export async function cacheGet(kv, key) {
 
 /**
  * 写入缓存
+ * 注意：空数组/空字符串不写入。检索类缓存若把"0 结果"写进去，
+ * 一次上游抖动就会让该查询在 TTL 内永远拿不到兜底机会（踩过这个坑）。
  */
 export async function cacheSet(kv, key, value, ttl = DEFAULT_TTL) {
   if (!kv || !key || value == null) return;
+  if (Array.isArray(value) && value.length === 0) return;
   try {
     await kv.put(key, JSON.stringify(value), { ttl });
   } catch (e) {

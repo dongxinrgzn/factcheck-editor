@@ -6,10 +6,22 @@ import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL, clearKBCache } from '../utils/cache.js';
 import { searchText, searchClassic, CLASSIC_TEXTS } from '../sources/ctext.js';
 import { searchZdic } from '../sources/zdic.js';
-import { searchGushiwen } from '../sources/gushiwen.js';
+import { searchGushiwen, extractPoemQuery } from '../sources/gushiwen.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
 import { submitDraft, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
+import { runCheck } from './check.js';
+
+/** 粗判是否为诗词类文本（长短句 + 书名号标题 + 无古籍关键词） */
+function isPoem(text) {
+  const s = String(text || '');
+  if (/《[^》]{2,40}》/.test(s)) return true;          // 有作品名
+  if (/[，。；]"|"[，。；]/.test(s)) return true;        // 引号包住的成句
+  // 多个四/五/七言短句，逗号分隔
+  const clauses = s.split(/[，,。；;]/).filter(x => x.trim().length >= 4);
+  const short = clauses.filter(x => x.trim().length <= 12).length;
+  return clauses.length >= 3 && short / clauses.length >= 0.6;
+}
 
 export async function handleVerifyAncient(request, env) {
   let body;
@@ -58,29 +70,37 @@ export async function handleVerifyAncient(request, env) {
   }
 
   // 2. 古籍原文匹配（多学科通用：数学用指纹，哲学/诗文用字符重叠）
+  //    子请求预算：searchClassic 会遍历 7 部书 × 各章（每章 1 次 fetch，含 1.1s 限速），
+  //    是整条链路上最耗额度的环节。诗词类文本在古籍库里必然 0 命中，
+  //    先判定再决定是否走这一步，避免白白烧掉几十个子请求导致整体失败。
   let allMatches = [];
   let classicInfo = null;
-  try {
-    classicInfo = await callLLMJson({
-      messages: buildMathExtractMessages(text),
-      apiKey,
-      temperature: 0.1,
-      maxTokens: 512,
-    });
-    segResult.math_info = { ...classicInfo, auto_detected: true };
+  const poemLike = isPoem(text);
+  if (!poemLike) {
     try {
-      const classicHits = await searchClassic(text, classicInfo?.suspected_book || '', env);
-      allMatches.push(...classicHits);
+      classicInfo = await callLLMJson({
+        messages: buildMathExtractMessages(text),
+        apiKey,
+        temperature: 0.1,
+        maxTokens: 512,
+      });
+      segResult.math_info = { ...classicInfo, auto_detected: true };
+      try {
+        const classicHits = await searchClassic(text, classicInfo?.suspected_book || '', env);
+        allMatches.push(...classicHits);
+      } catch {
+        // ctext 失败不阻塞
+      }
     } catch {
-      // ctext 失败不阻塞
+      // 古籍信息提取失败不阻塞
     }
-  } catch {
-    // 古籍信息提取失败不阻塞
+  } else {
+    segResult.math_info = { suspected_book: '', keywords: [], poem_like: true };
   }
 
   // 3. ctext 全文检索补充（用锚点，古籍原文未命中时补充）
-  if (allMatches.length < 3) {
-    for (const anchor of (segResult.anchors || []).slice(0, 3)) {
+  if (!poemLike && allMatches.length < 3) {
+    for (const anchor of (segResult.anchors || []).slice(0, 2)) {
       try {
         const hits = await searchText(anchor, env, {});
         allMatches.push(...hits);
@@ -90,7 +110,7 @@ export async function handleVerifyAncient(request, env) {
     }
   }
 
-  // 4. 古诗文网 + 汉典兜底
+  // 4. 古诗文网（诗词优先）+ 汉典兜底
   if (allMatches.length === 0) {
     try {
       const gw = await searchGushiwen(text, env);
@@ -98,6 +118,8 @@ export async function handleVerifyAncient(request, env) {
         book: r.title, chapter: '', urn: '', url: r.url, text: r.snippet, edition: 'gushiwen',
       })));
     } catch {}
+  }
+  if (allMatches.length === 0 && !poemLike) {
     try {
       const zd = await searchZdic(text, env);
       allMatches.push(...zd.map(r => ({
@@ -183,6 +205,38 @@ export async function handleVerifyAncient(request, env) {
 
   const ancientConfidence = ancientDraftCard?.confidence_tier || '中';
 
+  // 8. 叠加事实核查：古文查证只解决"出处是否有据"，
+  //    用户还要求"每个点都能验证是否属实"——所以再跑一遍逐点核查，
+  //    让报告同时包含【出处比对】与【事实真伪】两部分。
+  let factCheck = null;
+  let factCheckError = null;
+  try {
+    // 限 6 条 + 关闭检索兜底：古文流程本身已消耗十余个子请求，
+    // 叠加完整核查会撞上 Cloudflare "Too many subrequests"（单次调用上限 50）。
+    const fc = await runCheck(text, '', env, apiKey, {
+      mode: 'verify',
+      maxClaims: 6,
+      skipSearchFallback: true,
+    });
+    if (fc && Array.isArray(fc.claims) && fc.claims.length > 0) {
+      factCheck = {
+        claims: fc.claims,
+        ratings: fc.ratings || [],
+        rating: fc.rating || '中',
+        confidenceReason: fc.confidenceReason || '',
+        totalClaims: fc.totalClaims || fc.claims.length,
+        truncated: !!fc.truncated,
+        draftCard: fc.draftCard || null,
+        autoStored: !!fc.autoStored,
+      };
+    } else {
+      factCheckError = '未提取到可核查的事实点';
+    }
+  } catch (e) {
+    // 事实核查失败不阻塞古文查证主流程，但要暴露原因（否则前端只能看到静默无结果）
+    factCheckError = e.message;
+  }
+
   const result = {
     segment: segResult.segmented || text,
     anchors: segResult.anchors || [],
@@ -190,11 +244,20 @@ export async function handleVerifyAncient(request, env) {
     matches: clustered,
     math_info: segResult.math_info || null,
     all_low_confidence: allLow,
-    note: allLow ? '未找到精确匹配，疑似讹误/辑佚' : '',
+    // 分类：诗词类文本（古籍库无诗词集）给明确提示，而非静默"疑似讹误"
+    poem_title: extractPoemQuery(text),
+    note: allLow
+      ? (isPoem(text)
+          ? '未在古籍库中找到出处（内置古籍库仅含先秦/哲学/算学七部，不含诗词集）。下方"事实核查"已对文本中各事实点逐条验证。'
+          : '未找到精确匹配，疑似讹误/辑佚')
+      : '',
     classic_books: CLASSIC_TEXTS.map(b => b.label),
-    draftCard: ancientDraftCard,
-    autoStored: ancientAutoStored,
-    confidence: ancientConfidence,
+    factCheck: factCheck,
+    factCheckError: factCheckError,
+    draftCard: ancientDraftCard || factCheck?.draftCard || null,
+    autoStored: ancientAutoStored || !!factCheck?.autoStored,
+    confidence: factCheck?.rating || ancientConfidence,
+    confidenceReason: factCheck?.confidenceReason || '',
     auditDebug: auditDebug,
   };
 

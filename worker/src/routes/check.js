@@ -5,7 +5,7 @@ import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, searchCacheKey, clearKBCache } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
-import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
+import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
@@ -13,6 +13,70 @@ import { autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
+
+// 单次核查最多处理的断言条数
+// 权衡：条数越多覆盖越全，但检索+评级耗时线性增长（实测约 4s/条）。
+// 10 条 ≈ 40s，是"逐点覆盖"与"可用等待时长"的平衡点；超出部分由前端提示分段提交。
+const MAX_CLAIMS = 10;
+
+/** 限并发 map：避免一次性打爆上游（LLM / 检索源）触发限流 */
+async function mapLimit(items, limit, fn) {
+  const list = Array.isArray(items) ? items : [];
+  const out = new Array(list.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= list.length) break;
+      try {
+        out[idx] = await fn(list[idx], idx);
+      } catch (e) {
+        out[idx] = { error: e.message };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * 构造检索词（断言模式）
+ *
+ * 关键：不要把含数字的 metric 直接拼进检索词。
+ * 反例："金" + "1064℃" → 维基全文检索把 "1064" 当关键词 →
+ *       召回 宋朝(1064年) / 析津府(1064年) / 名偵探柯南(金曜日) / 通寧水(金雞納霜) 等噪音，
+ *       真正的"金"词条证据被稀释 → LLM 拿不到熔点数据 → 判"低"且 evidence 为空。
+ *
+ * 策略：
+ * - metric 是"属性名"（熔点/作者/地壳含量/熔点…）→ 拼上，有助定向
+ * - metric 是"数值"（含数字/单位）→ 只保留其中的属性词部分，数值丢弃
+ *   （数值应交给评级环节比对，不该作为检索词）
+ * - metric 为空 → 用 claim 去掉数值后作为检索词
+ */
+function buildSearchQuery(claim) {
+  const entity = (claim.entity || '').trim();
+  const metric = (claim.metric || '').trim();
+
+  // claim 去数值版本："金的熔点约为1064℃" → "金的熔点约为" 意义不大，
+  // 故优先用 entity；无 entity 时才退回 claim 去数值。
+  const stripNumbers = (s) => s
+    .replace(/\d+(?:[.,]\d+)*\s*(?:℃|°C|%|％|公斤|千克|吨|克|厘米|千米|公里|毫米|米|平方公里|平方米|公顷|升|毫升|万人|亿人|万|亿|年|月|日|岁|個|个|美元|元|港元|欧元|日元)?/g, '')
+    .replace(/[，,。.、：:；;（）()【】\[\]"'"'“”‘’]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (entity) {
+    // metric 无数字 → 是属性名，拼上；有数字 → 去掉数字后若还剩属性词则拼上
+    if (metric && !/\d/.test(metric)) return `${entity} ${metric}`;
+    const metricWord = stripNumbers(metric);
+    if (metricWord && metricWord.length >= 2 && metricWord !== entity) {
+      return `${entity} ${metricWord}`;
+    }
+    return entity;
+  }
+  const fromClaim = stripNumbers(claim.claim || '');
+  return fromClaim || (claim.claim || '');
+}
 
 // 属性维度词：断言中出现这些词时，检索词带上维度（如"大熊猫 体重"），
 // 并作为 hint 传给维基深度抽取，定向定位正文数据句
@@ -172,7 +236,7 @@ function buildFactCard(results, entity, queryText = '') {
  * 核查核心流程（供 /api/check 与 /api/kb/submit 复用）
  * @returns {Object} { claims, searches, ratings, rating, corrections, draftCard, factCard? }
  */
-export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query' } = {}) {
+export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query', maxClaims = MAX_CLAIMS, skipSearchFallback = false } = {}) {
   const intent = mode === 'verify' ? 'assertion' : 'query';
 
   // 0. 两种模式共享的：检索
@@ -445,56 +509,96 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     messages: extractMsgs,
     apiKey,
     temperature: 0.1,
-    maxTokens: 1024,
+    maxTokens: 3000,
   });
 
   if (!Array.isArray(claims) || claims.length === 0) {
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
 
-  // 2. 对每条断言检索证据
-  const checkSearches = await Promise.all(
-    claims.slice(0, 5).map(async (c) => {
-      // 直接用 LLM 提取的 entity 和 metric，不再依赖正则
+  // 2. 对每条断言检索证据（逐点覆盖：不再截断到 5 条；限并发避免打爆检索源）
+  const checkSearches = await mapLimit(
+    claims.slice(0, maxClaims), 4, async (c) => {
+      // 检索词：entity + 属性词（数值不参与检索，避免数字噪音污染）
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
-      const hint2 = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
-      const sq = entity2 ? (hint2 ? `${entity2} ${hint2}` : entity2) : c.claim;
+      const metricRaw = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
+      // hint 仅传属性名（维基深度抽取用），数值不当 hint
+      const hint2 = metricRaw && !/\d/.test(metricRaw) ? metricRaw : '';
+      const sq = buildSearchQuery(c);
       const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
-      if (cached) return { claim: c, results: cached, cached: true };
+      // 注意：只复用"有结果"的缓存。空结果不入缓存，
+      // 否则一次检索失败会被缓存 30 天，后续请求永远拿不到兜底机会。
+      if (cached && Array.isArray(cached) && cached.length > 0) {
+        return { claim: c, query: sq, results: cached, cached: true };
+      }
 
       try {
-        const raw = await braveSearch({ query: sq, preferOfficial: true, topK: 5, whitelist, hint: hint2 });
+        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 5, whitelist, hint: hint2 });
+        // 以下兜底会额外消耗子请求额度（Cloudflare 单次调用上限 50）。
+        // 古文查证等复合流程调用时置 skipSearchFallback，避免超限整体失败。
+        if (!skipSearchFallback) {
+          // 检索结果与实体完全不相关 → 强制全网兜底一次
+          if (entity2 && raw.length > 0) {
+            const relevant = filterRelevant(raw, entity2);
+            if (relevant.length === 0) {
+              const forced = await braveSearchForce(sq, 5, env.TAVILY_KEY);
+              if (forced.length > 0) raw = forced;
+            }
+          }
+          // 0 结果（多见于诗词/典故/习语类断言，维基不收录）→ 全网兜底
+          if (raw.length === 0 && env.TAVILY_KEY) {
+            try {
+              const tv = await tavilySearch(sq, { apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'basic' });
+              if (tv && tv.results && tv.results.length > 0) raw = tv.results;
+            } catch { /* 兜底失败保持空 */ }
+          }
+        }
         const annotated = annotateResults(raw, env);
-        await cacheSet(env.FACT_CACHE, cacheK, annotated);
-        return { claim: c, results: annotated, cached: false };
+        if (annotated.length > 0) await cacheSet(env.FACT_CACHE, cacheK, annotated);
+        return { claim: c, query: sq, results: annotated, cached: false };
       } catch (e) {
-        return { claim: c, results: [], cached: false, error: e.message };
+        return { claim: c, query: sq, results: [], cached: false, error: e.message };
       }
-    })
+    }
   );
 
   // 3. 评级
-  const ratings = await Promise.all(
-    checkSearches.map(async (sr) => {
-      if (!sr.results || sr.results.length === 0) {
-        return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实' };
-      }
+  // 注意：切不可用无上限 Promise.all —— 十几条断言同时打 LLM 会触发上游限流，
+  // 表现为部分条目 callLLMJson 抛错 → 只能落到 catch（rating:'medium'、evidence:'评级失败'），
+  // 报告里就会出现莫名其妙的"评级失败"且 sources 为空。改为限并发 + 失败重试。
+  const ratings = await mapLimit(checkSearches, 4, async (sr) => {
+    if (!sr.results || sr.results.length === 0) {
+      return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实', sources: [] };
+    }
+    const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
+    const msgs = buildRateTruthMessages(sr.claim.claim, evidence);
+    let lastErr = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
-        const msgs = buildRateTruthMessages(sr.claim.claim, evidence);
         const r = await callLLMJson({
           messages: msgs,
           apiKey,
           temperature: 0.1,
           maxTokens: 1024,
         });
-        return { claim: sr.claim, ...r, sources: sr.results };
+        if (r && typeof r === 'object') {
+          return { claim: sr.claim, ...r, sources: sr.results };
+        }
+        lastErr = 'LLM 返回空';
       } catch (e) {
-        return { claim: sr.claim, rating: 'medium', evidence: '评级失败', correction: e.message };
+        lastErr = e.message;
       }
-    })
-  );
+    }
+    // 两次都失败：仍保留检索来源，明确标注为"评级未完成"而非静默丢弃证据
+    return {
+      claim: sr.claim,
+      rating: 'medium',
+      evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${sr.results.length} 条相关资料。`,
+      correction: '',
+      sources: sr.results,
+    };
+  });
 
   // 4. 知识库入库：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
@@ -521,14 +625,27 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     ? '低'
     : '中';
 
-  // 评级转中文
+  // 评级转中文（注意：必须放在统计之前/独立统计，勿用转中文字段做英文比较）
   const ratingsCn = ratings.map(r => ({ ...r, rating: ratingCn(r.rating) }));
+
+  // 可信度（供前端提示栏使用，与查询模式保持一致的语义）
+  const confidence = overallFinal;
+  const nHigh = ratings.filter(r => r.rating === 'high').length;
+  const nLow = ratings.filter(r => r.rating === 'low').length;
+  const nMid = ratings.length - nHigh - nLow;
+  const confidenceReason = ratings.length > 0
+    ? `共核查 ${ratings.length} 个事实点：${nHigh} 条属实、${nMid} 条存疑、${nLow} 条查无实据/有误`
+    : '未能提取到可核查的事实点';
 
   return {
     intent: 'verify',
     claims,
     searches: checkSearches,
     rating: overallFinal,
+    confidence,
+    confidenceReason,
+    truncated: claims.length > MAX_CLAIMS,
+    totalClaims: claims.length,
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),

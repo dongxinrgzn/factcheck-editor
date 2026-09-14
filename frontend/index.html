@@ -565,17 +565,19 @@ body {
       '<span class="rating-badge ' + ratingClass + '">真实度：' + rating + '</span></div>';
 
     if (data.ratings && data.ratings.length > 0) {
-      html += data.ratings.map(function(r) {
+      html += '<div class="report-section" style="font-size:15px;font-weight:600;">逐点核查（共 ' +
+        data.ratings.length + ' 项）</div>';
+      html += data.ratings.map(function(r, idx) {
         var c = r.rating === '高' ? 'rating-high' :
                 r.rating === '中' ? 'rating-medium' : 'rating-low';
         var html2 = '<div class="report-section">' +
-          '<span class="rating-badge ' + c + '">' + r.rating + '</span>' +
-          '<div style="margin-top:8px;"><strong>断言：</strong>' + escapeHtml(r.claim?.claim || '') + '</div>' +
-          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '') + '</div>';
+          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' +
+          '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
+          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
         if (r.correction) {
           html2 += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
         }
-        if (r.sources) {
+        if (r.sources && r.sources.length) {
           html2 += r.sources.map(function(s) {
             return '<a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
               escapeHtml(s.title || '') + '] ↗</a>';
@@ -584,6 +586,10 @@ body {
         html2 += '</div>';
         return html2;
       }).join('');
+      if (data.truncated) {
+        html += '<div class="correction-box">文本事实点较多，本次核查了前 ' + data.ratings.length +
+          ' 个（共 ' + escapeHtml(String(data.totalClaims || '')) + ' 个），可分段提交以核查其余内容。</div>';
+      }
     }
 
     // 古文结果
@@ -603,13 +609,52 @@ body {
           '</div>';
       }).join('');
       if (data.all_low_confidence) {
-        html += '<div class="correction-box">未找到精确匹配，疑似讹误/辑佚</div>';
+        html += '<div class="correction-box">' + escapeHtml(data.note || '未找到精确匹配，疑似讹误/辑佚') + '</div>';
       }
       if (data.math_info && data.math_info.suspected_book) {
         html += '<div class="report-section" style="color:#666;font-size:13px;">' +
           '推测出处：' + escapeHtml(data.math_info.suspected_book) +
           (data.math_info.auto_detected ? '（自动识别）' : '') + '</div>';
       }
+    }
+
+    // 古文模式叠加的事实核查结果（逐点验证）
+    if (data.factCheck && data.factCheck.ratings && data.factCheck.ratings.length > 0) {      var fcr = data.factCheck.rating || '中';
+      var fcrClass = fcr === '高' ? 'rating-high' : (fcr === '中' ? 'rating-medium' : 'rating-low');
+      html += '<div class="report-section" style="border-top:2px solid #e3e3e3;margin-top:16px;padding-top:12px;">' +
+        '<div style="font-size:15px;font-weight:600;margin-bottom:10px;">事实核查（逐点验证）</div>' +
+        '<span class="rating-badge ' + fcrClass + '">整体真实度：' + escapeHtml(fcr) + '</span>' +
+        (data.factCheck.confidenceReason ? '<div style="font-size:12px;color:#888;margin-top:6px;">' +
+          escapeHtml(data.factCheck.confidenceReason) + '</div>' : '') +
+        '</div>';
+      html += data.factCheck.ratings.map(function(r, idx) {
+        var c = r.rating === '高' ? 'rating-high' : (r.rating === '中' ? 'rating-medium' : 'rating-low');
+        var item = '<div class="report-section">' +
+          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' +
+          '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
+          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
+        if (r.correction) {
+          item += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
+        }
+        if (r.sources && r.sources.length) {
+          item += r.sources.map(function(s) {
+            return '<a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
+              escapeHtml(s.title || '') + '] ↗</a>';
+          }).join('');
+        }
+        item += '</div>';
+        return item;
+      }).join('');
+      if (data.factCheck.truncated) {
+        html += '<div class="correction-box">文本事实点较多，本次核查了前 ' +
+          (data.factCheck.ratings || []).length + ' 个（共 ' + escapeHtml(String(data.factCheck.totalClaims || '')) +
+          ' 个），可分段提交以核查其余内容。</div>';
+      }
+    } else if (data.factCheckError) {
+      // 事实核查未能完成时给出明确原因，避免用户看到静默的空白
+      html += '<div class="report-section" style="border-top:2px solid #e3e3e3;margin-top:16px;padding-top:12px;">' +
+        '<div style="font-size:15px;font-weight:600;margin-bottom:8px;">事实核查（逐点验证）</div>' +
+        '<div class="correction-box">本次未能完成事实核查：' + escapeHtml(data.factCheckError) + '</div></div>';
     }
 
     // 入库提示（内联）已在函数开头统一计算，避免各分支提前 return 导致漏渲染

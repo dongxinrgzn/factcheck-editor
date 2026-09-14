@@ -29,6 +29,13 @@ id = "6564e7ee32574a7fb15f3d8c4902c9d6"
 binding = "FACT_KB"
 id = "112efd0ff26c40c08b008fb602047f15"
 
+# 运行限制说明（重要）：
+# 免费版单次 Worker 调用的子请求上限硬性为 50，且无法通过 [limits] 声明放宽
+# （实测声明 [limits] 会被 API 拒绝：workers/scripts/.../versions failed）。
+# 因此复合流程（古文查证 + 叠加事实核查）必须在代码侧省着用子请求：
+#   - verifyAncient.js：诗词类文本跳过 searchClassic 的 7 部书遍历、maxClaims=6、skipSearchFallback=true
+#   - check.js：mapLimit 限并发、空结果不入缓存（避免一次抖动污染 30 天）
+
 [vars]
 LLM_PROVIDER = "siliconflow"
 LLM_MODEL = "Qwen/Qwen2.5-72B-Instruct"

@@ -300,11 +300,11 @@ body {
   <div class="panel">
     <h2>待查文本</h2>
     <div class="text-input">
-      <textarea id="input-text" placeholder="粘贴需要查询/验证的文本或古文片段..."></textarea>
+      <textarea id="input-text" placeholder="查询模式：输入单点问题（如"黄山 海拔"）；查证模式：粘贴整段待核查文本..."></textarea>
       <div class="mode-tabs">
         <label><input type="radio" name="mode" value="query" checked> 查询</label>
-        <label><input type="radio" name="mode" value="verify"> 验证</label>
-        <label><input type="radio" name="mode" value="ancient"> 古文查证</label>
+        <label><input type="radio" name="mode" value="check"> 查证</label>
+        <span style="font-size:11px;color:#999;margin-left:8px;">查证会自动识别古文并叠加出处比对</span>
       </div>
       <div class="btn-row">
         <button class="btn-primary" id="btn-check">查证</button>
@@ -390,10 +390,21 @@ body {
     $('btn-test').textContent = '测试连通';
   };
 
-  // 模式切换
+  // 模式切换（query 查询 / check 查证）
   document.querySelectorAll('input[name="mode"]').forEach(function(r) {
-    r.onchange = function() { state.mode = r.value; };
+    r.onchange = function() {
+      state.mode = r.value;
+      localStorage.setItem('fc_mode', r.value);
+    };
   });
+  // 恢复上次选择的模式
+  (function() {
+    var saved = localStorage.getItem('fc_mode');
+    if (saved === 'check' || saved === 'query') {
+      var el = document.querySelector('input[name="mode"][value="' + saved + '"]');
+      if (el) { el.checked = true; state.mode = saved; }
+    }
+  })();
 
   // 统一 fetch 封装
   async function apiFetch(path, opts) {
@@ -419,15 +430,18 @@ body {
       return;
     }
     box.innerHTML = results.map(function(r) {
-      var tagHtml = r.official_tag
-        ? '<span class="tag-official">★官方</span>'
-        : '<span class="tag-unofficial">待甄别</span>';
+      var isKb = r.source === 'kb' || r.from_kb === true;
+      var tagHtml = isKb
+        ? '<span class="tag-official" style="background:#2e7d32;color:#fff;">知识库</span>'
+        : (r.official_tag
+            ? '<span class="tag-official">★官方</span>'
+            : '<span class="tag-unofficial">待甄别</span>');
       var title = r.title || '(无标题)';
       var url = r.url || '#';
       var snippet = (r.snippet || r.description || '').slice(0, 200);
       var score = r.official_score != null ? '官方性：' + r.official_score : '';
       var siteHtml = r.site_name ? '<span style="color:#0a7d32;font-size:12px;font-weight:600;margin-right:6px;">[' + escapeHtml(r.site_name) + ']</span>' : '';
-      return '<div class="result-item">' +
+      return '<div class="result-item"' + (isKb ? ' style="background:#f4faf4;border-left:3px solid #4caf50;"' : '') + '>' +
         '<div class="title">' + tagHtml + siteHtml +
         '<a href="' + escapeHtml(url) + '" target="_blank">' + escapeHtml(title) + ' ↗</a></div>' +
         '<div class="snippet">' + escapeHtml(snippet) + '</div>' +
@@ -436,40 +450,89 @@ body {
     }).join('');
   }
 
-  // 计算入库提示（内联 HTML + 右下角 toast）。
+  // 计算"知识库来源 + 入库提示"（内联 HTML + 右下角 toast）。
   // 必须在 renderReport 开头统一调用：查询模式与"知识库命中"两个分支会提前 return，
   // 把提示逻辑放在函数末尾会导致最常用的查询模式永远看不到提示。
+  //
+  // 展示位置说明：知识库命中信息与入库提示共用报告区"底部提示块"这个位置——
+  // 已入库的内容不需要再提示入库，正好把这个位置让给"来自知识库"的说明。
   function buildStoreNotice(data) {
-    if (!data || !data.draftCard) return null;
-    state.lastDraftCard = data.draftCard;   // 保存到 state 供手动入库使用
-    var draftTitle = data.draftCard.title || '';
-    if (data.autoStored) {
-      // 右下角提示：自动入库（自动审核）
-      showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + draftTitle });
-      return {
-        html: '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
-          escapeHtml(draftTitle) + '（自动审核）</div>'
-      };
+    if (!data) return null;
+    var blocks = [];
+    var title = data.draftCard ? (data.draftCard.title || '') : ((data.kbInfo && data.kbInfo.title) || '');
+
+    // ---- 1. 知识库来源汇总（顶部）----
+    var kbCount = data.kbCount || 0;
+    if (!kbCount && data.factCheck) kbCount = data.factCheck.kbCount || 0;
+    if (data.kbHit && data.kbInfo) {
+      // 查询模式整段命中
+      blocks.push('<div class="report-section" style="background:#eef7ee;border:1px solid #c8e6c9;border-radius:6px;padding:10px;margin-top:14px;">' +
+        '<strong style="color:#2e7d32;">✓ 本条解答来自知识库</strong>' +
+        '<div style="font-size:12px;color:#555;margin-top:4px;">词条：' + escapeHtml(data.kbInfo.title || '') +
+        '（' + escapeHtml(data.kbInfo.auditLabel || '已审核') + '，共 ' + escapeHtml(String(data.kbInfo.factCount || 0)) + ' 条事实' +
+        (data.kbInfo.updatedAt ? '，更新于 ' + escapeHtml(data.kbInfo.updatedAt) : '') + '）</div></div>');
+      showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + (data.kbInfo.title || '') });
+    } else if (kbCount > 0) {
+      blocks.push('<div class="report-section" style="background:#eef7ee;border:1px solid #c8e6c9;border-radius:6px;padding:10px;margin-top:14px;">' +
+        '<strong style="color:#2e7d32;">✓ 本次 ' + kbCount + ' 个事实点来自知识库</strong>' +
+        '<div style="font-size:12px;color:#555;margin-top:4px;">已在下方对应条目标注「知识库」，其余条目为全网实时检索结果。</div></div>');
     }
-    var confLabel = data.confidence || '中';
-    // 右下角提示：可入库/不入库，入库后显示人工审核
-    showToast({
-      type: 'manual',
-      title: '可信度：' + confLabel + '，可选择是否入库',
-      desc: '词条：' + draftTitle,
-      actions: [
-        { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
-        { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
-      ]
-    });
-    return {
-      html: '<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
-        '。词条：' + escapeHtml(draftTitle) +
-        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
-        'onclick="window._manualStore()">入库</button>' +
-        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
-        'onclick="window._skipStore()">不入库</button></div>'
-    };
+
+    // ---- 2. 入库提示 ----
+    if (data.draftCard) {
+      state.lastDraftCard = data.draftCard;   // 保存到 state 供手动入库使用
+      if (data.autoStored) {
+        // 自动入库：把实际入库的词条列出来（含部分入库的情况）
+        var storedList = (data.partialStored && data.partialStored.length)
+          ? data.partialStored
+          : [{ title: title, count: (data.draftCard.facts || []).length }];
+        var storedText = storedList.map(function(s) {
+          return escapeHtml(s.title) + '（' + escapeHtml(String(s.count || 0)) + ' 条事实）';
+        }).join('、');
+        blocks.push('<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">' +
+          '★ 已自动入知识库（自动审核）：' + storedText + '</div>');
+        showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + storedList.map(function(s) { return s.title; }).join('、') });
+
+        // 除自动入库外，仍有未达标的条目 → 补一个可手动入库的提示
+        var leftover = data.partialSkipped || [];
+        if (leftover.length > 0) {
+          var loText = leftover.map(function(s) {
+            return escapeHtml(s.title) + '（' + escapeHtml(String(s.count || 0)) + ' 条）';
+          }).join('、');
+          blocks.push('<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:1px dashed #bbdefb;margin-top:8px;padding-top:8px;">' +
+            '☆ 以下词条未达自动入库标准，可手动入库：' + loText +
+            ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" onclick="window._manualStore()">入库</button>' +
+            ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" onclick="window._skipStore()">不入库</button></div>');
+        }
+      } else {
+        var confLabel = data.confidence || '中';
+        var nHigh = (data.ratings || []).filter(function(r) { return r.rating === '高'; }).length;
+        var descExtra = (nHigh > 0)
+          ? '（其中 ' + nHigh + ' 个事实点判为高可信）'
+          : '';
+        showToast({
+          type: 'manual',
+          title: '可信度：' + confLabel + '，可选择是否入库',
+          desc: '词条：' + title + descExtra,
+          actions: [
+            { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
+            { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
+          ]
+        });
+        blocks.push('<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
+          descExtra + '。词条：' + escapeHtml(title) +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
+          'onclick="window._manualStore()">入库</button>' +
+          ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
+          'onclick="window._skipStore()">不入库</button></div>');
+      }
+    } else if (!data.kbHit && kbCount === 0 && !data.autoStored) {
+      // 无草稿卡（如全部查无实据）：给一句说明，避免用户以为界面没反应
+      blocks.push('<div class="report-section" style="color:#999;border-top:1px dashed #e0e0e0;margin-top:14px;padding-top:10px;font-size:12px;">' +
+        '本次未生成可入库词条（未提取到通过审核的事实点）。</div>');
+    }
+
+    return { html: blocks.join('') };
   }
 
   // 渲染核查报告
@@ -562,16 +625,23 @@ body {
     var ratingClass = rating === '高' ? 'rating-high' :
                       rating === '中' ? 'rating-medium' : 'rating-low';
     var html = '<div class="report-section">' +
-      '<span class="rating-badge ' + ratingClass + '">真实度：' + rating + '</span></div>';
+      '<span class="rating-badge ' + ratingClass + '">真实度：' + rating + '</span>' +
+      (data.confidenceReason ? '<div style="font-size:12px;color:#888;margin-top:6px;">' + escapeHtml(data.confidenceReason) + '</div>' : '') +
+      '</div>';
 
     if (data.ratings && data.ratings.length > 0) {
+      var kbTotal = data.ratings.filter(function(r) { return r.fromKB; }).length;
       html += '<div class="report-section" style="font-size:15px;font-weight:600;">逐点核查（共 ' +
-        data.ratings.length + ' 项）</div>';
+        data.ratings.length + ' 项' + (kbTotal > 0 ? '，其中 ' + kbTotal + ' 项来自知识库' : '') + '）</div>';
       html += data.ratings.map(function(r, idx) {
         var c = r.rating === '高' ? 'rating-high' :
                 r.rating === '中' ? 'rating-medium' : 'rating-low';
-        var html2 = '<div class="report-section">' +
-          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' +
+        var kbBadge = r.fromKB
+          ? '<span class="tag-official" style="background:#2e7d32;color:#fff;margin-left:6px;">知识库' +
+            (r.kbInfo && r.kbInfo.auditLabel ? '·' + escapeHtml(r.kbInfo.auditLabel) : '') + '</span>'
+          : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>';
+        var html2 = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
+          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
           '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
         if (r.correction) {
@@ -629,8 +699,12 @@ body {
         '</div>';
       html += data.factCheck.ratings.map(function(r, idx) {
         var c = r.rating === '高' ? 'rating-high' : (r.rating === '中' ? 'rating-medium' : 'rating-low');
-        var item = '<div class="report-section">' +
-          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' +
+        var kbBadge = r.fromKB
+          ? '<span class="tag-official" style="background:#2e7d32;color:#fff;margin-left:6px;">知识库' +
+            (r.kbInfo && r.kbInfo.auditLabel ? '·' + escapeHtml(r.kbInfo.auditLabel) : '') + '</span>'
+          : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>';
+        var item = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
+          '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
           '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
         if (r.correction) {
@@ -713,6 +787,21 @@ body {
   }
   window._showToast = showToast;
 
+  // 粗判是否为古文/诗词类文本，决定查证模式走哪条链路
+  // （与后端 verifyAncient 的 isPoem 保持一致的判据，避免前后端路由分叉）
+  function looksLikeAncient(s) {
+    s = String(s || '');
+    if (/《[^》]{2,40}》/.test(s)) return true;        // 含作品名
+    if (/[，。；]"[^"]{4,}"|"[^"]{4,}"[，。；]/.test(s)) return true;  // 引号包住的成句
+    // 多个文言虚词特征
+    if (/(之|乎|者|也|矣|焉|哉|兮|其|乃|夫|盖|是以|所谓)/.test(s) &&
+        /[，。；]/.test(s) && s.length < 200) return true;
+    // 多个四/五/七言短句
+    var clauses = s.split(/[，,。；;]/).filter(function(x) { return x.trim().length >= 4; });
+    var short = clauses.filter(function(x) { return x.trim().length <= 12; }).length;
+    return clauses.length >= 3 && short / clauses.length >= 0.6;
+  }
+
   // 查证按钮
   $('btn-check').onclick = async function() {
     var text = $('input-text').value.trim();
@@ -726,71 +815,53 @@ body {
     $('report-area').innerHTML = '<div class="loading">核查中...</div>';
 
     try {
-      if (state.mode === 'ancient') {
-        // 古文查证
-        var ad = await apiFetch('/api/verify-ancient', {
-          method: 'POST',
-          body: JSON.stringify({ text: text, category: 'auto' })
-        });
-        renderReport(ad);
-        // 把 ctext/古诗文网等命中来源展示到检索结果区
-        var ancientSources = (ad.matches || []).map(function(m) {
-          return { title: m.book || m.edition || '', url: m.url || '#', snippet: m.text || '', official_tag: m.edition === 'ctext' };
-        });
-        renderResults(ancientSources);
-      } else {
-        // 查询模式：先查知识库，命中直接返回；未命中走 /api/check
-        var kbHit = false;
-        if (state.mode === 'query') {
-          try {
-            var kbData = await apiFetch('/api/kb/query', {
-              method: 'POST',
-              body: JSON.stringify({ keyword: text })
+      if (state.mode === 'check') {
+        // 查证模式（合并原「验证」+「古文查证」）：
+        // 前端按文本特征路由，古文/诗词走 verify-ancient（含出处比对 + 逐点核查），
+        // 其余走 /api/check 的 verify 分支（纯逐点核查）。
+        // 后端两条链路都会先查知识库。
+        if (looksLikeAncient(text)) {
+          var ad = await apiFetch('/api/verify-ancient', {
+            method: 'POST',
+            body: JSON.stringify({ text: text, category: 'auto' })
+          });
+          renderReport(ad);
+          // 出处来源 + 逐点核查来源一起展示到检索结果区
+          var ancientSources = (ad.matches || []).map(function(m) {
+            return { title: m.book || m.edition || '', url: m.url || '#', snippet: m.text || '', official_tag: m.edition === 'ctext' };
+          });
+          var fcSrc = [];
+          ((ad.factCheck && ad.factCheck.searches) || []).forEach(function(s) {
+            (s.results || []).forEach(function(r) {
+              fcSrc.push({ title: r.title || '', url: r.url || '#', snippet: r.snippet || '',
+                official_tag: !!r.official_tag, from_kb: s.fromKB === true });
             });
-            if (kbData.hit && kbData.card) {
-              // KB 命中：从 facts 中找与用户查询最相关的一条作为"直接解答"
-              var card = kbData.card;
-              var ans = '';
-              if (card.facts && card.facts.length) {
-                var kw = text.toLowerCase();
-                // 优先找 label 与查询词匹配的 fact
-                var best = card.facts.find(function(f) {
-                  var lbl = (f.label || '').toLowerCase();
-                  return lbl && kw.includes(lbl) || lbl.includes(kw);
-                });
-                // 其次找 value 中含查询关键词的 fact
-                if (!best) {
-                  best = card.facts.find(function(f) {
-                    return (f.value || '').includes(text) || text.includes((f.label || ''));
-                  });
-                }
-                // 兜底：跳过"相关数据"等无意义标签，找有实际数值的
-                if (!best) {
-                  best = card.facts.find(function(f) {
-                    return f.label && f.label !== '相关数据' && /\d/.test(f.value || '');
-                  });
-                }
-                if (!best) best = card.facts[0];
-                ans = (best.label || '') + '：' + (best.value || '');
-              }
-              renderReport({ intent: 'query', answer: ans, confidence: '高', confidenceReason: '来自知识库' + (card.facts ? '（' + card.facts.length + '条事实）' : ''), factCard: card });
-              renderResults([]);
-              // 右下角提示：命中知识库
-              showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + (card.title || '') });
-              kbHit = true;
-            }
-          } catch {}
-        }
-        if (!kbHit) {
-          // 查询 / 验证（统一调 /api/check，后端按 mode 参数走不同分支）
+          });
+          renderResults(ancientSources.concat(fcSrc));
+        } else {
           var cd = await apiFetch('/api/check', {
             method: 'POST',
-            body: JSON.stringify({ text: text, mode: state.mode })
+            body: JSON.stringify({ text: text, mode: 'verify' })
           });
           var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
           renderResults(allResults);
           renderReport(cd);
         }
+      } else {
+        // 查询模式：后端 /api/check 已内置"整段先查 KB"，
+        // 命中会直接返回 kbHit，无需前端再单独调 /api/kb/query。
+        var qd = await apiFetch('/api/check', {
+          method: 'POST',
+          body: JSON.stringify({ text: text, mode: 'query' })
+        });
+        if (qd.kbHit) {
+          renderResults((qd.searches && qd.searches[0] && qd.searches[0].results) || []);
+          showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + ((qd.kbInfo && qd.kbInfo.title) || '') });
+        } else {
+          var qAll = (qd.searches || []).flatMap(function(s) { return s.results || []; });
+          renderResults(qAll);
+        }
+        renderReport(qd);
       }
     } catch (e) {
       $('report-area').innerHTML = '<div class="error-msg">错误：' + escapeHtml(e.message) + '</div>';

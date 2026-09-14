@@ -9,7 +9,7 @@ import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTerm
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
+import { autoAudit, approveEntry, mergeEntry, slugify, queryEntry } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
@@ -37,6 +37,83 @@ async function mapLimit(items, limit, fn) {
   });
   await Promise.all(workers);
   return out;
+}
+
+/**
+ * 为单条断言查知识库
+ *
+ * 命中判据：KB 词条的 title/alias 与该断言的实体相关，或词条内有 fact
+ * 的 label 与该断言文本显著重合。
+ * 命中时把词条事实包装成"检索结果"形状（source: 'kb'），
+ * 复用下游评级与展示链路，并在 rating 上打 fromKB 标记。
+ *
+ * @returns {Promise<{results:Array, info:Object}|null>}
+ */
+async function lookupKBForClaim(env, claim, entity) {
+  if (!env.FACT_KB) return null;
+  const probes = [];
+  if (entity) probes.push(entity);
+  const sq = buildSearchQuery(claim);
+  if (sq && sq !== entity) probes.push(sq);
+  const claimText = (claim.claim || '').trim();
+  if (claimText) probes.push(claimText);
+
+  for (const probe of probes) {
+    if (!probe || probe.length < 2) continue;
+    let hit = null;
+    try {
+      hit = await queryEntry(env.FACT_KB, probe);
+    } catch { hit = null; }
+    if (!hit || !hit.hit || !hit.card) continue;
+
+    const card = hit.card;
+    const facts = Array.isArray(card.facts) ? card.facts : [];
+    if (facts.length === 0) continue;
+
+    // 从词条事实中挑与断言最相关的一条：优先 label 命中，其次 value 含断言数值
+    const nums = (claimText.match(/\d+(?:\.\d+)?/g) || []);
+    let best = facts.find(f => {
+      const lbl = (f.label || '');
+      return lbl && (claimText.includes(lbl) || lbl.includes(claimText));
+    });
+    if (!best && nums.length > 0) {
+      best = facts.find(f => nums.some(n => (f.value || '').includes(n)));
+    }
+    if (!best) best = facts[0];
+
+    const isManual = card.status === 'verified';
+    const kbSource = {
+      title: `${card.title || '知识库'}（知识库${isManual ? '·人工审核' : '·自动审核'}）`,
+      url: best.source?.url || '',
+      snippet: `【知识库】${best.label || ''}：${best.value || ''}`,
+      source: 'kb',
+      official_score: 0.9,
+      official_tag: true,
+    };
+    const refs = Array.isArray(card.references) ? card.references : [];
+    const extra = refs.slice(0, 3).map(r => ({
+      title: `${card.title || ''}（知识库来源）`,
+      url: r.url || '',
+      snippet: r.name || '',
+      source: 'kb',
+      official_score: 0.85,
+      official_tag: true,
+    })).filter(r => r.url);
+
+    return {
+      results: [kbSource, ...extra],
+      info: {
+        title: card.title || '',
+        status: card.status || '',
+        auditLabel: isManual ? '人工审核' : '自动审核',
+        factLabel: best.label || '',
+        factValue: best.value || '',
+        updatedAt: card.updated_at || '',
+        factCount: facts.length,
+      },
+    };
+  }
+  return null;
 }
 
 /**
@@ -121,6 +198,19 @@ export async function handleCheck(request, env) {
  */
 const RATING_CN = { high: '高', medium: '中', low: '低', info: '查询结果', unknown: '未知' };
 function ratingCn(r) { return RATING_CN[r] || r; }
+
+/**
+ * 评级归一化：LLM 被要求用中文输出（高/中/低），但内部逻辑一律按英文
+ * （high/medium/low）比较。此函数必须在 LLM 返回的第一时间调用，
+ * 否则下游所有 `=== 'high'` 判断都会静默失配——
+ * 表现为：可信度为"高"却永不自动入库、facts 的 value 落不到"属实"分支。
+ */
+const RATING_EN = { 高: 'high', 中: 'medium', 低: 'low', high: 'high', medium: 'medium', low: 'low' };
+function ratingEn(r) {
+  if (r == null) return 'medium';
+  const k = String(r).trim();
+  return RATING_EN[k] || 'medium';
+}
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
 const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
@@ -289,6 +379,18 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     ? (typeof env.OFFICIAL_WHITELIST === 'string' ? JSON.parse(env.OFFICIAL_WHITELIST) : env.OFFICIAL_WHITELIST)
     : ['gov.cn', 'org.cn'];
 
+  // ---------- 知识库优先（两种模式共用）----------
+  // 查询/查证都先查 KB：命中则直接把 KB 词条当作"检索结果"，
+  // 跳过全网检索，并在返回里标记 kbHit，供前端显示"来自知识库"。
+  // 注意：整段文本先查一次；逐点断言级的 KB 查询在下方 checkSearches 里做。
+  let wholeKbHit = null;
+  if (intent === 'query') {
+    try {
+      const kb = await lookupKBForClaim(env, { claim: text, entity: entity || text }, entity);
+      if (kb) wholeKbHit = kb;
+    } catch { wholeKbHit = null; }
+  }
+
   let searchResults = null;
   try {
     const cacheK = searchCacheKey(searchQuery + '|card');
@@ -364,6 +466,38 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
   // ---------- 分支 A：查询模式 → 百科卡片 + 直接解答 + 可信度 ----------
   if (intent === 'query') {
+    // KB 命中：直接以知识库内容作答，不再调用 LLM/全网检索
+    if (wholeKbHit) {
+      const info = wholeKbHit.info || {};
+      const kbCard = {
+        title: info.title || entity || '',
+        facts: [{
+          key: 'fact_0',
+          label: info.factLabel || entity || '',
+          value: info.factValue || '',
+          rating: 'high',
+          source: { name: `${info.title}（知识库）`, url: wholeKbHit.results[0]?.url || '', official_tag: true, official_score: 0.9 },
+          verified_at: info.updatedAt || '',
+          confidence: 'high',
+        }],
+        references: wholeKbHit.results.slice(1).map(r => ({ name: r.title, url: r.url, official_score: r.official_score || 0.85 })),
+      };
+      return {
+        intent: 'query',
+        factCard: kbCard,
+        answer: `${info.factLabel || ''}：${info.factValue || ''}`,
+        confidence: '高',
+        confidenceReason: `来自知识库（${info.auditLabel || '已审核'}，共 ${info.factCount || 0} 条事实）`,
+        ratings: [],
+        searches: [{ claim: { claim: text, entity: entity || '' }, query: entity || text, results: wholeKbHit.results, kb: info, fromKB: true }],
+        kbHit: true,
+        kbInfo: info,
+        kbCount: 1,
+        draftCard: null,
+        autoStored: false,
+      };
+    }
+
     const factCard = buildFactCard(searchResults, entity || text.trim(), text);
 
     // 基于原始检索结果，让 LLM 直接提取数据并生成解答。
@@ -478,9 +612,16 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         if (audit.pass) {
           try {
             const slug = slugify(queryDraftCard.title);
-            await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified', category: '自动' }, 'auto_audit');
-            await clearKBCache(env.FACT_KB);
-            queryAutoStored = true;
+            const existing = await env.FACT_KB.get(entryKeyOf(slug));
+            if (existing) {
+              // 已存在同名词条 → 合并追加新事实点（去重），避免整卡覆盖
+              const mr = await mergeEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
+              if (mr.ok && mr.added > 0) { await clearKBCache(env.FACT_KB); queryAutoStored = true; }
+            } else {
+              await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified', category: '自动' }, 'auto_audit');
+              await clearKBCache(env.FACT_KB);
+              queryAutoStored = true;
+            }
           } catch {}
         }
       }
@@ -517,24 +658,34 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   }
 
   // 2. 对每条断言检索证据（逐点覆盖：不再截断到 5 条；限并发避免打爆检索源）
+  //    知识库优先：先按断言（及其实体）查 KB，命中则直接采用，不再走全网检索。
   const checkSearches = await mapLimit(
     claims.slice(0, maxClaims), 4, async (c) => {
-      // 检索词：entity + 属性词（数值不参与检索，避免数字噪音污染）
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
       const metricRaw = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
       // hint 仅传属性名（维基深度抽取用），数值不当 hint
       const hint2 = metricRaw && !/\d/.test(metricRaw) ? metricRaw : '';
       const sq = buildSearchQuery(c);
+
+      // ---- 知识库优先 ----
+      const kb = await lookupKBForClaim(env, c, entity2);
+      if (kb) {
+        return { claim: c, query: sq, results: kb.results, kb: kb.info, fromKB: true };
+      }
+
       const cacheK = searchCacheKey(sq);
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
       // 注意：只复用"有结果"的缓存。空结果不入缓存，
       // 否则一次检索失败会被缓存 30 天，后续请求永远拿不到兜底机会。
       if (cached && Array.isArray(cached) && cached.length > 0) {
-        return { claim: c, query: sq, results: cached, cached: true };
+        return { claim: c, query: sq, results: cached, cached: true, fromKB: false };
       }
 
       try {
-        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 5, whitelist, hint: hint2 });
+        // 必须传 tavilyApiKey：braveSearch 在维基命中时会短路，结果常清一色
+        // zh.wikipedia.org。diversifyDomains 需要 Tavily 才能补出第二个域名，
+        // 否则自动入库门槛②（≥2 域名）永远过不了。
+        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 6, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: !skipSearchFallback });
         // 以下兜底会额外消耗子请求额度（Cloudflare 单次调用上限 50）。
         // 古文查证等复合流程调用时置 skipSearchFallback，避免超限整体失败。
         if (!skipSearchFallback) {
@@ -556,7 +707,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }
         const annotated = annotateResults(raw, env);
         if (annotated.length > 0) await cacheSet(env.FACT_CACHE, cacheK, annotated);
-        return { claim: c, query: sq, results: annotated, cached: false };
+        return { claim: c, query: sq, results: annotated, cached: false, fromKB: false };
       } catch (e) {
         return { claim: c, query: sq, results: [], cached: false, error: e.message };
       }
@@ -568,8 +719,21 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 表现为部分条目 callLLMJson 抛错 → 只能落到 catch（rating:'medium'、evidence:'评级失败'），
   // 报告里就会出现莫名其妙的"评级失败"且 sources 为空。改为限并发 + 失败重试。
   const ratings = await mapLimit(checkSearches, 4, async (sr) => {
+    // 知识库命中的断言：直接用 KB 已审核的事实作答，不再打 LLM 评级
+    // （KB 里的内容已经过自动/人工审核，且能省下一次 LLM 调用）
+    if (sr.fromKB && sr.kb) {
+      return {
+        claim: sr.claim,
+        rating: 'high',
+        evidence: `${sr.kb.factLabel}：${sr.kb.factValue}`,
+        correction: '',
+        sources: sr.results,
+        fromKB: true,
+        kbInfo: sr.kb,
+      };
+    }
     if (!sr.results || sr.results.length === 0) {
-      return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实', sources: [] };
+      return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实', sources: [], fromKB: false };
     }
     const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
     const msgs = buildRateTruthMessages(sr.claim.claim, evidence);
@@ -583,7 +747,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           maxTokens: 1024,
         });
         if (r && typeof r === 'object') {
-          return { claim: sr.claim, ...r, sources: sr.results };
+          // LLM 用中文输出（高/中/低），此处立即归一化为英文，
+          // 保证下游所有 === 'high' 判断与入库门槛能正常生效。
+          return { claim: sr.claim, ...r, rating: ratingEn(r.rating), sources: sr.results, fromKB: false };
         }
         lastErr = 'LLM 返回空';
       } catch (e) {
@@ -597,6 +763,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${sr.results.length} 条相关资料。`,
       correction: '',
       sources: sr.results,
+      fromKB: false,
     };
   });
 
@@ -611,11 +778,124 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       if (audit.pass) {
         try {
           const slug = slugify(draftCard.title);
-          await approveEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
-          await clearKBCache(env.FACT_KB);
-          autoStored = true;
+          const existing = await env.FACT_KB.get(entryKeyOf(slug));
+          if (existing) {
+            // 已存在同名词条 → 合并追加（避免整卡覆盖旧事实）
+            const mr = await mergeEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
+            if (mr.ok && mr.added > 0) { await clearKBCache(env.FACT_KB); autoStored = true; }
+          } else {
+            await approveEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
+            await clearKBCache(env.FACT_KB);
+            autoStored = true;
+          }
         } catch {}
       }
+    }
+  }
+
+  // 4b. 部分入库：并非所有事实点都能达到整体"高"的门槛（长文本里常有 1-2 条存疑），
+  //     但其中"高"的那些事实点本身是达标的，应当自动入库——否则用户会遇到
+  //     "明明大部分都判高，却一条都没入库、只弹了个可入库提示"的情况。
+  //     这里为每条达标事实单独建词条（title = 实体），命中已存在词条则合并追加。
+  const partialStored = [];
+  const partialSkipped = [];
+  let partialDebug = null;
+  if (!autoStored && draftCard) {
+    // 注意：draftCard.facts 经过 buildDraftCard 的过滤（丢弃无 value/无 source 的条目），
+    // 其下标已与 ratings / checkSearches 不再对齐。
+    // 因此这里以 ratings（与 checkSearches 严格同序）为准重建事实，不要用 draftCard.facts[i]。
+    const byEntity = new Map();
+    let considered = 0;
+    ratings.forEach((rt, i) => {
+      if (rt.rating !== 'high') return;
+      const sr = checkSearches[i];
+      const results = (sr?.results || []).filter(r => r && r.url);
+      const top = results.slice().sort((a, b) => (b.official_score || 0) - (a.official_score || 0))[0];
+      if (!top) return;
+      const ent = (rt.claim?.entity || draftCard.title || '').trim();
+      if (!ent) return;
+      considered++;
+      if (!byEntity.has(ent)) byEntity.set(ent, { facts: [], refs: [] });
+      const bucket = byEntity.get(ent);
+      const evidence = String(rt.evidence || '').slice(0, 100);
+      bucket.facts.push({
+        key: `fact_${bucket.facts.length}`,
+        label: rt.claim?.claim || ent,
+        value: evidence ? `属实：${evidence}` : '属实',
+        metric: rt.claim?.metric || '',
+        time: rt.claim?.time || '',
+        rating: 'high',
+        source: {
+          name: top.title,
+          url: top.url,
+          official_score: top.official_score || 0,
+          official_tag: !!top.official_tag,
+        },
+        verified_at: new Date().toISOString().slice(0, 10),
+        confidence: 'high',
+      });
+      for (const r of results) {
+        bucket.refs.push({ name: r.title, url: r.url, official_score: r.official_score || 0 });
+      }
+    });
+    partialDebug = { considered, entities: [...byEntity.keys()] };
+
+    for (const [ent, bucket] of byEntity) {
+      const { facts, refs } = bucket;
+      // references 去重（按 url），最多 5 条
+      const seenRef = new Set();
+      const uniqRefs = [];
+      for (const r of refs) {
+        if (seenRef.has(r.url)) continue;
+        seenRef.add(r.url);
+        uniqRefs.push(r);
+        if (uniqRefs.length >= 5) break;
+      }
+      for (const f of facts) {
+        if (f.source?.url && !seenRef.has(f.source.url)) {
+          seenRef.add(f.source.url);
+          uniqRefs.push({ name: f.source.name, url: f.source.url, official_score: f.source.official_score || 0 });
+        }
+      }
+      const card = { title: ent, aliases: [], category: 'auto', facts, references: uniqRefs };
+      const audit = autoAudit(card);
+      if (!audit.pass) {
+        partialSkipped.push({
+          title: ent,
+          reason: (audit.reasons || []).join('；') || '未通过自动审核',
+          count: facts.length,
+          refs: uniqRefs.map(r => r.url).slice(0, 6),
+        });
+        continue;
+      }
+      try {
+        const slug = slugify(ent);
+        const existing = await env.FACT_KB.get(entryKeyOf(slug));
+        if (existing) {
+          // 同名词条：把新通过审核的高可信事实点合并追加进去（去重），
+          // 让知识库随查询逐步养全，而不是直接跳过。
+          const mr = await mergeEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
+          if (mr.ok && mr.added > 0) {
+            partialStored.push({ title: ent, count: mr.added, merged: true, total: facts.length });
+          } else {
+            partialSkipped.push({
+              title: ent,
+              reason: mr.reason || '词条已存在且无新增事实点',
+              count: facts.length,
+              existing: true,
+            });
+          }
+          continue;
+        }
+        await approveEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
+        partialStored.push({ title: ent, count: facts.length });
+      } catch (e) {
+        partialSkipped.push({ title: ent, reason: e.message, count: facts.length });
+      }
+    }
+    if (partialStored.length > 0) {
+      await clearKBCache(env.FACT_KB);
+      autoStored = true;
     }
   }
 
@@ -636,6 +916,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   const confidenceReason = ratings.length > 0
     ? `共核查 ${ratings.length} 个事实点：${nHigh} 条属实、${nMid} 条存疑、${nLow} 条查无实据/有误`
     : '未能提取到可核查的事实点';
+  const kbCount = checkSearches.filter(s => s.fromKB).length;
 
   return {
     intent: 'verify',
@@ -644,13 +925,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     rating: overallFinal,
     confidence,
     confidenceReason,
-    truncated: claims.length > MAX_CLAIMS,
+    truncated: claims.length > maxClaims,
     totalClaims: claims.length,
+    kbCount,
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,
     })),
     ratings: ratingsCn,
     draftCard,
     autoStored,
+    partialStored,
+    partialSkipped,
   };
 }
+
+/** 词条主键（与 kbStore 内部保持一致，仅用于存在性检查） */
+function entryKeyOf(slug) { return `kb:${slug}`; }

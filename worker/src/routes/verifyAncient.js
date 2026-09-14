@@ -228,6 +228,10 @@ export async function handleVerifyAncient(request, env) {
         truncated: !!fc.truncated,
         draftCard: fc.draftCard || null,
         autoStored: !!fc.autoStored,
+        partialStored: fc.partialStored || [],
+        partialSkipped: fc.partialSkipped || [],
+        kbCount: fc.kbCount || 0,
+        searches: fc.searches || [],
       };
     } else {
       factCheckError = '未提取到可核查的事实点';

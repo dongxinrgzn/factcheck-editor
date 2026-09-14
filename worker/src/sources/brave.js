@@ -617,19 +617,78 @@ export async function searxSiteSearch(domain, query, topK = 6) {
 }
 
 /**
+ * 结果域名去重后的主机名集合（去掉 www. 前缀）
+ */
+function hostSetOf(results) {
+  const s = new Set();
+  for (const r of results) {
+    try { s.add(new URL(r.url).hostname.toLowerCase().replace(/^www\./, '')); } catch {}
+  }
+  return s;
+}
+
+/**
+ * 域名多样性兜底
+ * 上游 braveSearch 的链路是「维基有结果就直接返回」，实际拿到的常常是清一色
+ * zh.wikipedia.org（单一域名）。但自动入库门槛②要求 ≥2 个独立来源域名，
+ * 单一域名会导致高可信事实永远过不了审 → 用户看不到"已自动入库"提示。
+ * 这里在域名单一时补一轮全网检索，把结果凑到至少 2 个域名。
+ * 补位结果排在维基之后，不改变原首条（维基深度抽取）的地位。
+ */
+async function diversifyDomains(results, query, topK, tavilyApiKey) {
+  const hosts = hostSetOf(results);
+  if (hosts.size >= 2) return results;
+  if (!query) return results;
+
+  const extra = [];
+  // 先试 DDG（无需密钥，价位最低）
+  try {
+    const ddg = await ddgSearch(query, topK + 3);
+    for (const r of ddg) if (r?.url) extra.push(r);
+  } catch { /* 忽略 */ }
+  // 仍单一域名 → 再试 Tavily（若配置了密钥）
+  if (hostSetOf([...results, ...extra]).size < 2 && tavilyApiKey) {
+    try {
+      const tv = await tavilySearch(query, { apiKey: tavilyApiKey, topK: topK + 3, searchDepth: 'basic' });
+      for (const r of tv.results || []) if (r?.url) extra.push(r);
+    } catch { /* 忽略 */ }
+  }
+  // 上游已有域名清一色时，优先让"新域名"的结果排在前面（否则 slice 截断会
+  // 把补充来源砍掉，白消耗一次检索）。同一域名内保持原有相对顺序。
+  const known = hosts;
+  const ranked = [...extra].sort((a, b) => {
+    const na = known.has(hostOf(a)) ? 1 : 0;
+    const nb = known.has(hostOf(b)) ? 1 : 0;
+    return na - nb;
+  });
+  return dedupe([...results, ...ranked]);
+}
+
+/** 单条结果的规范化主机名（去掉 www.） */
+function hostOf(r) {
+  try { return new URL(r.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+}
+
+/**
  * 综合全网检索（多源兜底）
  * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey }
  *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
  */
 export async function braveSearch(opts = {}) {
-  const { query, topK = 5, hint = '', tavilyApiKey } = opts;
+  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true } = opts;
   if (!query) return [];
 
   // 维基 → DDG → SearXNG，任一源有结果即返回（合并去重）
   const wiki = await wikiSearch(query, topK, hint);
   if (wiki.length > 0) {
     const ddg = await ddgSearch(query, Math.max(0, topK - wiki.length));
-    return dedupe([...wiki, ...ddg]).slice(0, topK);
+    let merged = dedupe([...wiki, ...ddg]);
+    // 域名多样性兜底：维基命中时上面会直接返回，导致结果常常清一色 zh.wikipedia.org。
+    // 而自动入库门槛要求「≥2 个独立域名」，单一域名会让高可信事实永远过不了审
+    // （表现为"明明判高却不出入库提示"）。这里在域名单一时补一轮全网检索凑多样性。
+    // diversify=false 用于子请求额度紧张的复合流程（如古文查证）。
+    if (diversify) merged = await diversifyDomains(merged, query, topK, tavilyApiKey);
+    return merged.slice(0, topK);
   }
   const ddg = await ddgSearch(query, topK);
   if (ddg.length > 0) return ddg.slice(0, topK);

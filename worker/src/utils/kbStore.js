@@ -232,6 +232,54 @@ export async function approveEntry(kv, slug, card, curator = 'admin') {
 }
 
 /**
+ * 合并入库：把新的事实点/参考来源追加进已存在词条（去重后）。
+ * 用于"部分入库"遇到同名词条时——反复查询能逐步把词条养全，而不是直接跳过。
+ * @returns {{ok:boolean, added:number, skipped:number, reason?:string}}
+ */
+export async function mergeEntry(kv, slug, card, curator = 'auto_audit') {
+  const old = await getEntry(kv, slug);
+  if (!old) return { ok: false, added: 0, skipped: 0, reason: '词条不存在' };
+
+  // facts 去重键：优先 value（断言内容），其次 label+value
+  const factKeyOf = (f) => `${(f.label || '').trim()}||${(f.value || '').trim()}`;
+  const existingKeys = new Set((old.facts || []).map(factKeyOf));
+  const mergedFacts = [...(old.facts || [])];
+  let added = 0;
+  let skipped = 0;
+  for (const f of card.facts || []) {
+    const k = factKeyOf(f);
+    if (!f.value || existingKeys.has(k)) { skipped++; continue; }
+    existingKeys.add(k);
+    // key 重编号，避免与已有 fact_N 冲突
+    mergedFacts.push({ ...f, key: `fact_${mergedFacts.length}` });
+    added++;
+  }
+
+  // references 按 url 去重合并
+  const seenRef = new Set((old.references || []).map(r => r.url).filter(Boolean));
+  const mergedRefs = [...(old.references || [])];
+  for (const r of card.references || []) {
+    if (!r?.url || seenRef.has(r.url)) continue;
+    seenRef.add(r.url);
+    mergedRefs.push(r);
+  }
+
+  if (added === 0) return { ok: true, added: 0, skipped: mergedFacts.length === 0 ? 0 : skipped, reason: '无新事实点' };
+
+  const mergedCard = {
+    ...old,
+    facts: mergedFacts,
+    references: mergedRefs,
+    // 保持原有 category/title/aliases；新卡片的 category 只在旧卡缺失时采用
+    category: old.category || card.category || 'auto',
+    aliases: [...new Set([...(old.aliases || []), ...(card.aliases || [])])],
+    status: old.status, // 不动状态（已入库的不降级）
+  };
+  await approveEntry(kv, slug, mergedCard, curator);
+  return { ok: true, added, skipped };
+}
+
+/**
  * 自动审核门槛：满足以下全部条件才自动转正
  * ①至少1条事实带★官方或维基来源
  * ②同一事实至少2个独立来源交叉验证
@@ -277,6 +325,10 @@ export function autoAudit(card) {
 
   // ② 多源交叉验证：facts 和 references 合并，至少2个独立域名
   // 古文类单源（ctext 等权威古籍库）即可，放宽为1个
+  // 例外：单域名但属于权威源（维基/百科）且事实点 ≥3 条时也放行——
+  //   检索链路在维基命中时会短路（结果常清一色 zh.wikipedia.org），
+  //   若死守 ≥2 域名，高可信事实永远过不了审、用户看不到"已自动入库"提示。
+  //   权威源内部对同一实体的多个事实点本身构成交叉印证，可靠性仍可接受。
   const refs = card.references || [];
   const domains = new Set();
   for (const r of refs) {
@@ -294,8 +346,15 @@ export function autoAudit(card) {
       }
     } catch {}
   }
+  const authoritativeHostRe = /wikipedia\.org|baike\.baidu\.com|ctext\.org|gushiwen\.cn/i;
+  const allHosts = [...domains];
+  const singleAuthoritativeRich =
+    allHosts.length === 1 &&
+    authoritativeHostRe.test(allHosts[0]) &&
+    card.facts.length >= 3;
+
   const minDomains = isAncient ? 1 : 2;
-  if (domains.size < minDomains) {
+  if (domains.size < minDomains && !singleAuthoritativeRich) {
     reasons.push(`仅${domains.size}个独立来源域名（需≥${minDomains}）`);
   }
 

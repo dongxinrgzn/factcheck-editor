@@ -257,18 +257,26 @@ export function autoAudit(card) {
     reasons.push(`${noSource.length}条事实无来源URL`);
   }
 
+  // 古文类标识（用于放宽权威源和域名要求）
+  const isAncient = card.category === '古文';
+
   // ① 至少1条事实来自官方或维基
+  // 古文类额外接受 ctext.org（中国哲学书电子化计划）和 gushiwen.cn（古诗文网）为权威源
+  const authoritativeRe = isAncient
+    ? /wikipedia\.org|baike\.baidu\.com|ctext\.org|gushiwen\.cn/i
+    : /wikipedia\.org|baike\.baidu\.com/i;
   const hasAuthoritative = card.facts.some(f =>
     f.source && (
-      f.source.official_tag ||                              // ★官方
-      /wikipedia\.org|baike\.baidu\.com/i.test(f.source.url || '') // 维基/百科
+      f.source.official_tag ||
+      authoritativeRe.test(f.source.url || '')
     )
   );
   if (!hasAuthoritative) {
     reasons.push('无官方或百科来源');
   }
 
-  // ② 多源交叉验证：references 中至少2个独立域名
+  // ② 多源交叉验证：facts 和 references 合并，至少2个独立域名
+  // 古文类单源（ctext 等权威古籍库）即可，放宽为1个
   const refs = card.references || [];
   const domains = new Set();
   for (const r of refs) {
@@ -277,8 +285,18 @@ export function autoAudit(card) {
       domains.add(h);
     } catch {}
   }
-  if (domains.size < 2) {
-    reasons.push(`仅${domains.size}个独立来源域名（需≥2）`);
+  // facts 的来源也计入域名数
+  for (const f of card.facts) {
+    try {
+      if (f.source && f.source.url) {
+        const h = new URL(f.source.url).hostname.replace(/^www\./, '');
+        domains.add(h);
+      }
+    } catch {}
+  }
+  const minDomains = isAncient ? 1 : 2;
+  if (domains.size < minDomains) {
+    reasons.push(`仅${domains.size}个独立来源域名（需≥${minDomains}）`);
   }
 
   return { pass: reasons.length === 0, reasons };

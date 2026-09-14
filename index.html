@@ -244,9 +244,47 @@ body {
   padding: 1px 6px;
   border-radius: 3px;
 }
+/* 右下角入库提示 toast */
+#toast-box {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 9999;
+  max-width: 340px;
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--muted);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text);
+  animation: toastIn .22s ease-out;
+}
+.toast.toast-auto { border-left-color: var(--green); background: #f1f8f2; }
+.toast.toast-manual { border-left-color: var(--accent); background: #f1f6fd; }
+.toast.toast-info { border-left-color: #9aa0a6; }
+.toast .toast-title { font-weight: 600; margin-bottom: 2px; }
+.toast .toast-desc { color: var(--muted); font-size: 12px; word-break: break-all; }
+.toast .toast-actions { margin-top: 8px; display: flex; gap: 6px; }
+.toast .toast-actions button {
+  font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--border); background: #fff; color: var(--text);
+}
+.toast .toast-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.toast .toast-close { float: right; cursor: pointer; color: #aaa; font-size: 15px; line-height: 1; margin-left: 8px; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 </style>
 </head>
 <body>
+<!-- 右下角提示容器 -->
+<div id="toast-box"></div>
+
 <div class="topbar">
   <h1>事实查询</h1>
   <div class="config">
@@ -538,17 +576,30 @@ body {
 
     if (data.draftCard) {
       state.lastDraftCard = data.draftCard;  // 保存到 state 供手动入库使用
+      var draftTitle = data.draftCard.title || '';
       if (data.autoStored) {
         html += '<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">★ 已自动入知识库，词条：' +
-          escapeHtml(data.draftCard.title || '') + '（自动审核）</div>';
+          escapeHtml(draftTitle) + '（自动审核）</div>';
+        // 右下角提示：自动入库（自动审核）
+        showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + draftTitle });
       } else {
         var confLabel = data.confidence || '中';
-        html += '<div class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
-          '。词条：' + escapeHtml(data.draftCard.title || '') +
+        html += '<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
+          '。词条：' + escapeHtml(draftTitle) +
           ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
           'onclick="window._manualStore()">入库</button>' +
           ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
           'onclick="window._skipStore()">不入库</button></div>';
+        // 右下角提示：可入库/不入库，入库后显示人工审核
+        showToast({
+          type: 'manual',
+          title: '可信度：' + confLabel + '，可选择是否入库',
+          desc: '词条：' + draftTitle,
+          actions: [
+            { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
+            { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
+          ]
+        });
       }
     }
 
@@ -569,6 +620,41 @@ body {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+
+  // ---- 右下角提示 toast ----
+  // opts: { type:'auto'|'manual'|'info', title, desc, ttl, actions:[{text,primary,onClick}] }
+  function showToast(opts) {
+    var box = $('toast-box');
+    if (!box) return null;
+    var el = document.createElement('div');
+    el.className = 'toast toast-' + (opts.type || 'info');
+    var html = '<span class="toast-close" title="关闭">×</span>';
+    if (opts.title) html += '<div class="toast-title">' + escapeHtml(opts.title) + '</div>';
+    if (opts.desc) html += '<div class="toast-desc">' + escapeHtml(opts.desc) + '</div>';
+    if (opts.actions && opts.actions.length) {
+      html += '<div class="toast-actions">';
+      opts.actions.forEach(function(a, i) {
+        html += '<button class="' + (a.primary ? 'primary' : '') + '" data-idx="' + i + '">' + escapeHtml(a.text) + '</button>';
+      });
+      html += '</div>';
+    }
+    el.innerHTML = html;
+    box.appendChild(el);
+    el.querySelector('.toast-close').onclick = function() { el.remove(); };
+    if (opts.actions && opts.actions.length) {
+      Array.prototype.forEach.call(el.querySelectorAll('.toast-actions button'), function(btn) {
+        btn.onclick = function() {
+          var a = opts.actions[parseInt(btn.getAttribute('data-idx'), 10)];
+          if (a && a.onClick) a.onClick(el); else el.remove();
+        };
+      });
+    }
+    // 无操作按钮的提示自动消失；带按钮的需用户处理（入库/不入库/关闭）
+    var ttl = opts.ttl != null ? opts.ttl : (opts.actions && opts.actions.length ? 0 : 6000);
+    if (ttl > 0) setTimeout(function() { if (el.parentNode) el.remove(); }, ttl);
+    return el;
+  }
+  window._showToast = showToast;
 
   // 查证按钮
   $('btn-check').onclick = async function() {
@@ -610,15 +696,18 @@ body {
               var ans = '';
               if (card.facts && card.facts.length) {
                 var kw = text.toLowerCase();
+                // 优先找 label 与查询词匹配的 fact
                 var best = card.facts.find(function(f) {
                   var lbl = (f.label || '').toLowerCase();
                   return lbl && kw.includes(lbl) || lbl.includes(kw);
                 });
+                // 其次找 value 中含查询关键词的 fact
                 if (!best) {
                   best = card.facts.find(function(f) {
                     return (f.value || '').includes(text) || text.includes((f.label || ''));
                   });
                 }
+                // 兜底：跳过"相关数据"等无意义标签，找有实际数值的
                 if (!best) {
                   best = card.facts.find(function(f) {
                     return f.label && f.label !== '相关数据' && /\d/.test(f.value || '');
@@ -629,6 +718,8 @@ body {
               }
               renderReport({ intent: 'query', answer: ans, confidence: '高', confidenceReason: '来自知识库' + (card.facts ? '（' + card.facts.length + '条事实）' : ''), factCard: card });
               renderResults([]);
+              // 右下角提示：命中知识库
+              showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + (card.title || '') });
               kbHit = true;
             }
           } catch {}
@@ -652,28 +743,36 @@ body {
     $('btn-check').disabled = false;
   };
 
-  // 手动入库：用户点击"入库"按钮，直接审核通过入库
-  window._manualStore = async function() {
+  // 手动入库：用户点击"入库"按钮，直接审核通过入库（人工审核）
+  window._manualStore = async function(done) {
     var card = state.lastDraftCard;
-    if (!card) { alert('没有可入库的数据，请先查证'); return; }
+    if (!card) {
+      showToast({ type: 'info', title: '没有可入库的数据，请先查证' });
+      if (done) done();
+      return;
+    }
     try {
       var r = await apiFetch('/api/kb/submit', {
         method: 'POST',
         body: JSON.stringify({ card: card, action: 'manual_store' })
       });
-      alert('入库成功！\n词条：' + (r.card && r.card.title) + '\n状态：人工审核');
+      var t = (r.card && r.card.title) || card.title || '';
+      // 右下角提示：入库成功 → 人工审核
+      showToast({ type: 'manual', title: '已入库（人工审核）', desc: '词条：' + t });
       state.lastDraftCard = null;
+      var tip = document.getElementById('store-choice-tip');
+      if (tip) tip.innerHTML = '<span style="color:#1565c0;">★ 已入库（人工审核）：' + escapeHtml(t) + '</span>';
       loadKbList('');
     } catch (e) {
-      alert('入库失败：' + e.message);
+      showToast({ type: 'manual', title: '入库失败', desc: e.message });
     }
+    if (done) done();
   };
 
   // 不入库：放弃当前核查结果
   window._skipStore = function() {
     state.lastDraftCard = null;
-    var box = $('report-area');
-    var tip = box.querySelector('[style*="dashed #bbdefb"]');
+    var tip = document.getElementById('store-choice-tip');
     if (tip) tip.innerHTML = '<span style="color:#999;">已放弃入库</span>';
   };
 

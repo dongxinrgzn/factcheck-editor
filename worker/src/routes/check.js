@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, searchCacheKey } from '../utils/cache.js';
+import { cacheGet, cacheSet, searchCacheKey, clearKBCache } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -363,12 +363,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 查询模式：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
     let queryDraftCard = null;
     let queryAutoStored = false;
-    if (factCard.facts.length > 0) {
-      queryDraftCard = {
-        title: entity || text.trim(),
-        aliases: [],
-        category: 'auto',
-        facts: factCard.facts.map(f => ({
+    // draftCard 事实来源：优先用 factCard 正则提取的 facts；若为空但 LLM 有高可信度答案，用 LLM 答案构建
+    const draftFacts = factCard.facts.length > 0
+      ? factCard.facts.map(f => ({
           label: f.property || text.trim(),
           value: f.value || '',
           rating: 'high',
@@ -380,7 +377,29 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           },
           verified_at: new Date().toISOString().slice(0, 10),
           confidence: confidence,
-        })),
+        }))
+      : (answer && confidence === '高' && searchResults && searchResults.length > 0
+        ? [{
+            label: entity || text.trim(),
+            value: answer,
+            rating: 'high',
+            source: {
+              name: searchResults[0]?.title || searchResults[0]?.site_name || '',
+              url: searchResults[0]?.url || '',
+              official_tag: searchResults[0]?.official_tag || false,
+              official_score: searchResults[0]?.official_tag ? 0.9 : 0.5,
+            },
+            verified_at: new Date().toISOString().slice(0, 10),
+            confidence: confidence,
+          }]
+        : []);
+
+    if (draftFacts.length > 0) {
+      queryDraftCard = {
+        title: entity || text.trim(),
+        aliases: [],
+        category: 'auto',
+        facts: draftFacts,
         references: (searchResults || []).slice(0, 5).map(r => ({
           name: r.title || r.site_name || '',
           url: r.url || '',
@@ -396,6 +415,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           try {
             const slug = slugify(queryDraftCard.title);
             await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified', category: '自动' }, 'auto_audit');
+            await clearKBCache(env.FACT_KB);
             queryAutoStored = true;
           } catch {}
         }
@@ -488,6 +508,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         try {
           const slug = slugify(draftCard.title);
           await approveEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
+          await clearKBCache(env.FACT_KB);
           autoStored = true;
         } catch {}
       }

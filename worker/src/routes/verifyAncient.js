@@ -3,13 +3,13 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL } from '../utils/cache.js';
+import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL, clearKBCache } from '../utils/cache.js';
 import { searchText, searchClassic, CLASSIC_TEXTS } from '../sources/ctext.js';
 import { searchZdic } from '../sources/zdic.js';
 import { searchGushiwen } from '../sources/gushiwen.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
-import { submitDraft } from '../utils/kbStore.js';
+import { submitDraft, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
 
 export async function handleVerifyAncient(request, env) {
   let body;
@@ -131,33 +131,57 @@ export async function handleVerifyAncient(request, env) {
   // 7. 判断是否全部低置信
   const allLow = isAllLowConfidence(clustered);
 
-  // 生成古文 draftCard（供入库用）
+  // 生成古文 draftCard + 自动入库逻辑
   let ancientDraftCard = null;
+  let ancientAutoStored = false;
+  let auditDebug = null;
   if (clustered.length > 0 && !allLow) {
     const bestMatch = clustered[0];
+    const confidence = bestMatch.confidence >= 0.8 ? '高' : '中';
     ancientDraftCard = {
       title: text.slice(0, 30),
       aliases: [],
-      category: 'ancient',
+      category: '古文',
       facts: [{
         label: text,
         value: `出处：${bestMatch.book || ''}${bestMatch.chapter ? ' · ' + bestMatch.chapter : ''}`,
-        rating: bestMatch.confidence >= 0.8 ? '高' : '中',
+        rating: confidence === '高' ? 'high' : 'medium',
         source: {
           name: bestMatch.book || bestMatch.edition || '',
           url: bestMatch.url || '',
           official_tag: bestMatch.edition === 'ctext',
+          official_score: bestMatch.edition === 'ctext' ? 0.9 : 0.5,
         },
         verified_at: new Date().toISOString().slice(0, 10),
+        confidence: confidence,
       }],
       references: clustered.slice(0, 5).map(m => ({
         name: `${m.book || ''}${m.chapter ? ' · ' + m.chapter : ''}`,
         url: m.url || '',
         official_tag: m.edition === 'ctext',
+        official_score: m.edition === 'ctext' ? 0.9 : 0.5,
       })),
+      confidence_tier: confidence,
     };
-    try { await submitDraft(env.FACT_KB, ancientDraftCard); } catch {}
+    // 高可信度 + autoAudit 通过 → 自接入库
+    // 注意：auditDebug 在函数作用域（上方）已声明，此处直接赋值，勿再 let 声明否则遮蔽
+    if (confidence === '高') {
+      const audit = autoAudit(ancientDraftCard);
+      auditDebug = audit;
+      if (audit.pass) {
+        try {
+          const slug = slugify(ancientDraftCard.title);
+          await approveEntry(env.FACT_KB, slug, { ...ancientDraftCard, status: 'auto_verified' }, 'auto_audit');
+          await clearKBCache(env.FACT_KB);
+          ancientAutoStored = true;
+        } catch (e) {
+          auditDebug = { ...audit, storeError: e.message };
+        }
+      }
+    }
   }
+
+  const ancientConfidence = ancientDraftCard?.confidence_tier || '中';
 
   const result = {
     segment: segResult.segmented || text,
@@ -169,6 +193,9 @@ export async function handleVerifyAncient(request, env) {
     note: allLow ? '未找到精确匹配，疑似讹误/辑佚' : '',
     classic_books: CLASSIC_TEXTS.map(b => b.label),
     draftCard: ancientDraftCard,
+    autoStored: ancientAutoStored,
+    confidence: ancientConfidence,
+    auditDebug: auditDebug,
   };
 
   // 缓存（古籍 90 天）

@@ -294,6 +294,46 @@ export async function mergeEntry(kv, slug, card, curator = 'auto_audit') {
 }
 
 /**
+ * 统一自动入库：**查询链路与查证链路共用这一个函数**。
+ *
+ * 用户明确要求两条链路的入库标准必须一致。此前两条链路各自写了一段几乎相同的
+ * 入库代码（各自判门槛、各自 merge/approve），差异是"标准漂移"的温床；现在
+ * 门槛（autoAudit 四关）与合并策略（同名词条 mergeEntry、否则 approveEntry）只有这一份。
+ *
+ * 事实形态由 attrClassify.storeFactOf 统一保证：属性名 label + 原文 value + 可引用出处，
+ * 因此 autoAudit 的第③关（每条评级必须 high）天然把非高可信事实挡在门外。
+ *
+ * @returns {{stored:boolean, merged?:boolean, added?:number, slug?:string, reason?:string}}
+ */
+export async function autoStoreCard(env, card) {
+  if (!card || !Array.isArray(card.facts) || card.facts.length === 0) {
+    return { stored: false, reason: '无事实点' };
+  }
+  const audit = autoAudit(card);
+  if (!audit.pass) {
+    return { stored: false, reason: (audit.reasons || []).join('；') || '未通过自动审核' };
+  }
+  const slug = slugify(card.title);
+  try {
+    const existing = await getEntry(env.FACT_KB, slug);
+    if (existing) {
+      // 已存在同名词条 → 合并追加（三道去重），绝不整卡覆盖丢已有事实
+      const mr = await mergeEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
+      if (mr.ok && mr.added > 0) {
+        await clearKBCache(env.FACT_KB);
+        return { stored: true, merged: true, added: mr.added, slug };
+      }
+      return { stored: false, reason: mr.reason || '词条已存在且无新增事实点', existing: true };
+    }
+    await approveEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
+    await clearKBCache(env.FACT_KB);
+    return { stored: true, merged: false, added: card.facts.length, slug };
+  } catch (e) {
+    return { stored: false, reason: e.message };
+  }
+}
+
+/**
  * 归一化词条事实（维护用）：拆多属性长句 → 按子句重贴属性标签 → 去重。
  *
  * 修复的是这类历史脏数据：早期入库把 label 一律贴成"查询属性词"，于是

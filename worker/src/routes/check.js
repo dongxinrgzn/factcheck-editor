@@ -3,15 +3,15 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, cacheDelete, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL, kbSelectCacheKey, KB_SEL_TTL } from '../utils/cache.js';
+import { cacheGet, cacheSet, cacheDelete, searchCacheKey, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL, kbSelectCacheKey, KB_SEL_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
-import { autoAudit, approveEntry, mergeEntry, slugify, queryEntry } from '../utils/kbStore.js';
-import { buildDraftCard } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS } from '../utils/attrClassify.js';
+import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
+import { buildDraftCard, buildStoreCardsByEntity } from '../utils/draftBuilder.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactOf, bestCitableSource } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -345,26 +345,15 @@ function expandQueryWithAttrSynonyms(query, metric) {
   return syn.length ? `${q} ${syn.join(' ')}` : q;
 }
 
-// 可拼进检索词的"属性名词"白名单（含 attrClassify 的全部指标名）。
-// 为什么需要白名单：大模型给的 metric 混杂了属性名词（体重/熔点/作者）与形容词性
+// 属性名词白名单与判据统一放在 utils/attrClassify.js（isAttrNoun / SEARCHABLE_ATTRS），
+// 因为"能不能拼进检索词"和"能不能当知识库事实标签"必须是同一份口径——
+// 此前这里一份、入库侧一份，迟早漂移。
+//
+// 为什么要白名单：大模型给的 metric 混杂了属性名词（体重/熔点/作者）与形容词性
 // 表述（金黄/柔软/不易被氧化/最古老的采金方法）。后者拼进检索词只会稀释召回——
 // 实测 "金 熔点" 能得到官方标准 PDF 与维基《灰吹法》（含"金熔点1064.1"），
 // 而 "金 金黄" 召回的是"胡杨林一片金黄""金黄色葡萄球菌"。
-const SEARCHABLE_ATTRS = new Set([
-  ...INDICATORS.map(([, prop]) => prop),
-  '熔点', '沸点', '密度', '硬度', '颜色', '含量', '成分', '作者', '成句', '出处', '别名',
-  '出生', '逝世', '成立', '发行', '上映', '位置', '高度', '宽度', '深度', '厚度', '直径',
-  '长度', '销量', '市值', '股价', '注册资本', '总部', '创始人', '首都',
-]);
-
-/** metric 是否是"可检索的属性名词"（精确命中，或包含已知属性词，如"地壳含量"） */
-function isSearchableAttr(metric) {
-  const m = String(metric || '').trim();
-  if (!m) return false;
-  if (SEARCHABLE_ATTRS.has(m)) return true;
-  for (const a of SEARCHABLE_ATTRS) if (a.length >= 2 && m.includes(a)) return true;
-  return false;
-}
+const isSearchableAttr = isAttrNoun;
 
 export async function handleCheck(request, env) {
   let body;
@@ -821,48 +810,60 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 查询模式：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
     let queryDraftCard = null;
     let queryAutoStored = false;
-    // draftCard 事实来源：优先用 factCard 正则提取的 facts；若为空但 LLM 有高可信度答案，用 LLM 答案构建
-    // label 取事实**自身**的属性名（classifyProp 的规范名，如 体长/肩高/体重），
-    // 而不是一律贴查询属性词 hint——后者会把"体长"数据贴上"体重"标签，
+    // 事实构造**统一走 attrClassify.storeFactOf**（与查证链路同一构造器，用户要求两条
+    // 链路的入库标准完全一致）：
+    //   label = 事实**自身**的属性名（classifyProp 规范名，如 体长/肩高/体重），
+    //   value = 数据**原文句**（factCard 正则抽出来的那句，不是模型生成的结论），
+    //   source = 可引用的真实页面。
+    // 不再一律贴查询属性词 hint——后者会把"体长"数据贴上"体重"标签，
     // 之后查"体长"就命中不了知识库，只能重新检索再把同一批数据入库（用户实测：
     // 大熊猫词条出现两条体长事实）。问"身高"时命中"肩高"事实由 ATTR_SYNONYMS 在查询侧兜住。
-    // fact 自身属性识别不出（'相关数据'）时才退回 hint / 实体名。
-    const draftLabelOf = (f) => {
-      const p = String((f && f.property) || '').trim();
-      if (p && p !== '相关数据') return p;
-      return hint || entity || text.trim();
-    };
     // 入库前剔除"无真实出处"的事实：检索引擎综合答案（url 指向聚合器而非原页面）
     // 只能当证据看，不能当知识库事实的来源——否则等于把一段模型生成的文字
     // 当成"有出处的事实"存进库里。
+    // 每条事实的 rating 取自本次答案的可信度（高→high/中→medium/低→low），
+    // 这样"是否自动入库"完全由共用的 autoAudit 第③关（每条必须 high）决定，
+    // 与查证链路同一口径，不再有"查询靠 confidence、查证靠 overall"两套判据。
+    const factRating = confidence === '高' ? 'high' : (confidence === '低' ? 'low' : 'medium');
+    // 统一补 key/time 两个字段，使查询链路与查证链路产出的事实**逐字段同形**
+    // （否则"两条链路标准一致"只在核心字段上成立，辅助字段仍有差异）。
+    const mkStoreFact = (o, i) => {
+      const f = storeFactOf(o);
+      return f ? { key: `fact_${i}`, ...f, time: '' } : null;
+    };
     const draftFacts = factCard.facts.length > 0
-      ? factCard.facts.filter(f => isCitableSource(f.source)).map(f => ({
-          label: draftLabelOf(f),
-          value: f.value || '',
-          rating: 'high',
+      ? factCard.facts.filter(f => isCitableSource(f.source)).map((f, i) => mkStoreFact({
+          property: f.property,
+          metric: hint,
+          entity: entity || text.trim(),
+          value: f.value || '',           // 正则抽出的数据原文句，直接用
           source: {
             name: f.source?.name || '',
             url: f.source?.url || '',
             official_tag: f.source?.official || false,
             official_score: f.source?.official ? 0.9 : 0.5,
           },
-          verified_at: new Date().toISOString().slice(0, 10),
-          confidence: confidence,
-        }))
-      : (answer && confidence === '高' && searchResults && searchResults.length > 0
-        ? [{
-            label: hint || entity || text.trim(),
-            value: answer,
-            rating: 'high',
-            source: {
-              name: searchResults[0]?.title || searchResults[0]?.site_name || '',
-              url: searchResults[0]?.url || '',
-              official_tag: searchResults[0]?.official_tag || false,
-              official_score: searchResults[0]?.official_tag ? 0.9 : 0.5,
-            },
-            verified_at: new Date().toISOString().slice(0, 10),
-            confidence: confidence,
-          }]
+          rating: factRating,
+        }, i)).filter(Boolean)
+      : (answer && confidence === '高' && Array.isArray(searchResults) && searchResults.length > 0
+        ? (() => {
+            // 正则没抽出数据句、但 LLM 高可信：**不把 LLM 的答案文本当事实存**
+            // （那是模型生成的表述，可能夹带推断）。改为从最优可引用来源的原文摘要里
+            // 挑一句数据原文——与查证链路完全同一条路径。
+            const src = bestCitableSource(searchResults);
+            if (!src) return [];
+            const hit = searchResults.find(r => r && r.url === src.url) || {};
+            const evi = String(hit.snippet || hit.summary || '').trim();
+            if (!evi) return [];
+            const f = mkStoreFact({
+              metric: hint,
+              entity: entity || text.trim(),
+              evidence: evi,
+              source: src,
+              rating: 'high',
+            }, 0);
+            return f ? [f] : [];
+          })()
         : []);
 
     if (draftFacts.length > 0) {
@@ -879,25 +880,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         })),
         confidence_tier: confidence,
       };
-      if (confidence === '高') {
-        // 高可信度：尝试自动审核入库
-        const audit = autoAudit(queryDraftCard);
-        if (audit.pass) {
-          try {
-            const slug = slugify(queryDraftCard.title);
-            const existing = await env.FACT_KB.get(entryKeyOf(slug));
-            if (existing) {
-              // 已存在同名词条 → 合并追加新事实点（去重），避免整卡覆盖
-              const mr = await mergeEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified' }, 'auto_audit');
-              if (mr.ok && mr.added > 0) { await clearKBCache(env.FACT_KB); queryAutoStored = true; }
-            } else {
-              await approveEntry(env.FACT_KB, slug, { ...queryDraftCard, status: 'auto_verified', category: '自动' }, 'auto_audit');
-              await clearKBCache(env.FACT_KB);
-              queryAutoStored = true;
-            }
-          } catch {}
-        }
-      }
+      // 与查证链路同一个入库函数、同一套门槛（autoAudit 四关，含"每条 rating 必须 high"）
+      const sr = await autoStoreCard(env, queryDraftCard);
+      queryAutoStored = sr.stored;
     }
 
     // 自愈：拿到证据却得出"没结果"（低置信 + 零事实点）→ 删掉这次的检索缓存。
@@ -1122,10 +1107,13 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         lastErr = e.message;
       }
     }
-    // 两次都失败：仍保留检索来源，明确标注为"评级未完成"而非静默丢弃证据
+    // 两次都失败：仍保留检索来源，明确标注为"评级未完成"而非静默丢弃证据。
+    // ratingFailed 标记用于**阻止这段系统提示文案被当成"证据原文"写进知识库**
+    // （实测：storeFactOf 会把 "自动评级未完成（…）" 当数据句存成一条事实）。
     return {
       claim: sr.claim,
       rating: 'medium',
+      ratingFailed: true,
       evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${relevant.length} 条相关资料。`,
       correction: '',
       sources: relevant,
@@ -1133,136 +1121,48 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     };
   });
 
-  // 4. 知识库入库：可信度高 + autoAudit 通过 → 直接入库（auto_verified）；其余可选入不入
+  // 4. 知识库入库：事实由 buildDraftCard（→ 统一构造器 storeFactOf）生成，
+  //    与查询链路的事实形态逐字段一致（属性名 label + 证据原文 value + 可引用出处）。
+  //    自动入库统一走 autoStoreCard —— 门槛（autoAudit 四关，含"每条 rating 必须 high"）
+  //    与合并策略（同名 mergeEntry / 否则 approveEntry）只有这一个实现，查询链路调的是同一个。
+  //    注：这里不再单独判 overall —— overall==='高' 等价于"每条 rating 都 high"，
+  //    正是 autoAudit 第③关，两套判据合成一套，从根上消除两条链路标准不一致。
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
   let autoStored = false;
-  if (draftCard && draftCard.facts.length > 0) {
-    const overall = ratings.every(r => r.rating === 'high') ? '高'
-      : ratings.some(r => r.rating === 'low') ? '低' : '中';
-    if (overall === '高') {
-      const audit = autoAudit(draftCard);
-      if (audit.pass) {
-        try {
-          const slug = slugify(draftCard.title);
-          const existing = await env.FACT_KB.get(entryKeyOf(slug));
-          if (existing) {
-            // 已存在同名词条 → 合并追加（避免整卡覆盖旧事实）
-            const mr = await mergeEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
-            if (mr.ok && mr.added > 0) { await clearKBCache(env.FACT_KB); autoStored = true; }
-          } else {
-            await approveEntry(env.FACT_KB, slug, { ...draftCard, status: 'auto_verified' }, 'auto_audit');
-            await clearKBCache(env.FACT_KB);
-            autoStored = true;
-          }
-        } catch {}
-      }
-    }
+  {
+    const res = await autoStoreCard(env, draftCard);
+    autoStored = res.stored;
   }
 
-  // 4b. 部分入库：并非所有事实点都能达到整体"高"的门槛（长文本里常有 1-2 条存疑），
-  //     但其中"高"的那些事实点本身是达标的，应当自动入库——否则用户会遇到
-  //     "明明大部分都判高，却一条都没入库、只弹了个可入库提示"的情况。
-  //     这里为每条达标事实单独建词条（title = 实体），命中已存在词条则合并追加。
+  // 4b. 部分入库：长文本里常有 1-2 条存疑，整体过不了门槛，但其中"高"的那些事实点
+  //     本身达标，应当自动入库——否则用户会遇到"明明大部分都判高，却一条都没入库"。
+  //     逐条事实同样由统一构造器生成（buildStoreCardsByEntity → storeFactOf），
+  //     不存在"整体入库用一套形态、部分入库用另一套形态"的偏差。
   const partialStored = [];
   const partialSkipped = [];
   let partialDebug = null;
-  if (!autoStored && draftCard) {
-    // 注意：draftCard.facts 经过 buildDraftCard 的过滤（丢弃无 value/无 source 的条目），
-    // 其下标已与 ratings / checkSearches 不再对齐。
-    // 因此这里以 ratings（与 checkSearches 严格同序）为准重建事实，不要用 draftCard.facts[i]。
-    const byEntity = new Map();
-    let considered = 0;
-    ratings.forEach((rt, i) => {
-      if (rt.rating !== 'high') return;
-      const sr = checkSearches[i];
-      const results = (sr?.results || []).filter(r => r && r.url);
-      const top = results.slice().sort((a, b) => (b.official_score || 0) - (a.official_score || 0))[0];
-      if (!top) return;
-      const ent = (rt.claim?.entity || draftCard.title || '').trim();
-      if (!ent) return;
-      considered++;
-      if (!byEntity.has(ent)) byEntity.set(ent, { facts: [], refs: [] });
-      const bucket = byEntity.get(ent);
-      const evidence = String(rt.evidence || '').slice(0, 100);
-      bucket.facts.push({
-        key: `fact_${bucket.facts.length}`,
-        label: rt.claim?.claim || ent,
-        value: evidence ? `属实：${evidence}` : '属实',
-        metric: rt.claim?.metric || '',
-        time: rt.claim?.time || '',
-        rating: 'high',
-        source: {
-          name: top.title,
-          url: top.url,
-          official_score: top.official_score || 0,
-          official_tag: !!top.official_tag,
-        },
-        verified_at: new Date().toISOString().slice(0, 10),
-        confidence: 'high',
-      });
-      for (const r of results) {
-        bucket.refs.push({ name: r.title, url: r.url, official_score: r.official_score || 0 });
-      }
-    });
-    partialDebug = { considered, entities: [...byEntity.keys()] };
+  if (!autoStored) {
+    const { cards, considered } = buildStoreCardsByEntity(ratings, checkSearches, draftCard?.title || '');
+    partialDebug = { considered, entities: cards.map(c => c.title) };
 
-    for (const [ent, bucket] of byEntity) {
-      const { facts, refs } = bucket;
-      // references 去重（按 url），最多 5 条
-      const seenRef = new Set();
-      const uniqRefs = [];
-      for (const r of refs) {
-        if (seenRef.has(r.url)) continue;
-        seenRef.add(r.url);
-        uniqRefs.push(r);
-        if (uniqRefs.length >= 5) break;
-      }
-      for (const f of facts) {
-        if (f.source?.url && !seenRef.has(f.source.url)) {
-          seenRef.add(f.source.url);
-          uniqRefs.push({ name: f.source.name, url: f.source.url, official_score: f.source.official_score || 0 });
-        }
-      }
-      const card = { title: ent, aliases: [], category: 'auto', facts, references: uniqRefs };
-      const audit = autoAudit(card);
-      if (!audit.pass) {
+    for (const item of cards) {
+      const ent = item.title;
+      const res = await autoStoreCard(env, item.card);
+      if (res.stored) {
+        partialStored.push(res.merged
+          ? { title: ent, count: res.added, merged: true, total: item.facts.length }
+          : { title: ent, count: item.facts.length });
+      } else {
         partialSkipped.push({
           title: ent,
-          reason: (audit.reasons || []).join('；') || '未通过自动审核',
-          count: facts.length,
-          refs: uniqRefs.map(r => r.url).slice(0, 6),
+          reason: res.reason || '未通过自动审核',
+          count: item.facts.length,
+          refs: (item.card.references || []).map(r => r.url).slice(0, 6),
+          ...(res.existing ? { existing: true } : {}),
         });
-        continue;
-      }
-      try {
-        const slug = slugify(ent);
-        const existing = await env.FACT_KB.get(entryKeyOf(slug));
-        if (existing) {
-          // 同名词条：把新通过审核的高可信事实点合并追加进去（去重），
-          // 让知识库随查询逐步养全，而不是直接跳过。
-          const mr = await mergeEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
-          if (mr.ok && mr.added > 0) {
-            partialStored.push({ title: ent, count: mr.added, merged: true, total: facts.length });
-          } else {
-            partialSkipped.push({
-              title: ent,
-              reason: mr.reason || '词条已存在且无新增事实点',
-              count: facts.length,
-              existing: true,
-            });
-          }
-          continue;
-        }
-        await approveEntry(env.FACT_KB, slug, { ...card, status: 'auto_verified' }, 'auto_audit');
-        partialStored.push({ title: ent, count: facts.length });
-      } catch (e) {
-        partialSkipped.push({ title: ent, reason: e.message, count: facts.length });
       }
     }
-    if (partialStored.length > 0) {
-      await clearKBCache(env.FACT_KB);
-      autoStored = true;
-    }
+    if (partialStored.length > 0) autoStored = true;
   }
 
   // 逐条入库状态 + 检索结果去噪
@@ -1331,6 +1231,3 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     partialSkipped,
   };
 }
-
-/** 词条主键（与 kbStore 内部保持一致，仅用于存在性检查） */
-function entryKeyOf(slug) { return `kb:${slug}`; }

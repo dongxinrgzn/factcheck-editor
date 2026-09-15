@@ -3,14 +3,14 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL, clearKBCache } from '../utils/cache.js';
+import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL } from '../utils/cache.js';
 import { searchText, searchClassic, CLASSIC_TEXTS } from '../sources/ctext.js';
 import { searchZdic } from '../sources/zdic.js';
 import { searchGushiwen, extractPoemQuery } from '../sources/gushiwen.js';
 import { lookupPoem } from '../sources/poetryDb.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
-import { submitDraft, autoAudit, approveEntry, slugify } from '../utils/kbStore.js';
+import { autoStoreCard } from '../utils/kbStore.js';
 import { runCheck } from './check.js';
 
 /** 粗判是否为诗词类文本（长短句 + 书名号标题 + 无古籍关键词） */
@@ -184,9 +184,12 @@ export async function handleVerifyAncient(request, env) {
       title: text.slice(0, 30),
       aliases: [],
       category: '古文',
+      // 事实形态与查询/查证链路统一：label 用**属性名词**（此处是"出处"），
+      // value 用可读的出处原文串。旧形态 label = 整段引文，同"整句当标签"的毛病一样，
+      // 会让词条按属性匹配时永远命中不了。
       facts: [{
-        label: text,
-        value: `出处：${bestMatch.book || ''}${bestMatch.chapter ? ' · ' + bestMatch.chapter : ''}`,
+        label: '出处',
+        value: `${bestMatch.book || ''}${bestMatch.chapter ? ' · ' + bestMatch.chapter : ''}`.trim() || text.slice(0, 60),
         rating: confidence === '高' ? 'high' : 'medium',
         source: {
           name: bestMatch.book || bestMatch.edition || '',
@@ -205,22 +208,19 @@ export async function handleVerifyAncient(request, env) {
       })),
       confidence_tier: confidence,
     };
-    // 高可信度 + autoAudit 通过 → 自接入库
+    // 自动入库统一走 autoStoreCard（与查询/查证链路**同一个函数**：同一门槛 autoAudit、
+    // 同一"同名词条 mergeEntry 合并 / 否则 approveEntry"策略）。
+    // 此处不再单独判 confidence —— autoAudit 第③关"每条 rating 必须 high"正是 confidence==='高'，
+    // 判据合并成一套，避免三条链路的标准再次漂移。
     // 注意：auditDebug 在函数作用域（上方）已声明，此处直接赋值，勿再 let 声明否则遮蔽
-    if (confidence === '高') {
-      const audit = autoAudit(ancientDraftCard);
-      auditDebug = audit;
-      if (audit.pass) {
-        try {
-          const slug = slugify(ancientDraftCard.title);
-          await approveEntry(env.FACT_KB, slug, { ...ancientDraftCard, status: 'auto_verified' }, 'auto_audit');
-          await clearKBCache(env.FACT_KB);
-          ancientAutoStored = true;
-        } catch (e) {
-          auditDebug = { ...audit, storeError: e.message };
-        }
-      }
-    }
+    const res = await autoStoreCard(env, ancientDraftCard);
+    ancientAutoStored = res.stored;
+    auditDebug = {
+      pass: res.stored,
+      reasons: res.stored ? [] : [res.reason || '未通过自动审核'],
+      merged: !!res.merged,
+      added: res.added || 0,
+    };
   }
 
   const ancientConfidence = ancientDraftCard?.confidence_tier || '中';

@@ -143,3 +143,128 @@ export function isDuplicateFact(a, b) {
   if (!va) return false;
   return va === measureSignature(b.value);
 }
+
+// ---------------------------------------------------------------------------
+// 入库事实构造（查询链路与查证链路**共用**，这是"两条链路入库标准一致"的落点）
+//
+// 背景：两条链路曾各自造事实，形态完全不通用——
+//   查询链路：label=属性名（体重）      value=数据原文（野生大熊猫的体重为60—73千克）
+//   查证链路：label=整句断言（金不易被氧化） value=核查结论（属实：<证据>／纠错：<模型结论>）
+// 后果有两个，都很致命：
+//   ① 知识库复用靠"属性词匹配 facts[].label"，查证存进去的 label 是整句话，
+//      结构上永远匹配不上 → 查证链路的自动入库等于白存；
+//   ② "纠错：…" 是模型生成的结论性文字，把它当"事实"存进库，违背
+//      "知识库不能有编造内容"的硬要求（纠错内容可能是错的/带主观推断）。
+// 因此统一为：**只存「属性 + 数据原文 + 可引用出处」形态的事实，且只存评级为高的**。
+// ---------------------------------------------------------------------------
+
+// 属性名词白名单：既是"可拼进检索词"的判据，也是"能否当事实标签"的判据。
+// 大模型给的 metric 混杂属性名词（体重/熔点/作者）与形容词性表述（金黄/柔软/
+// 不易被氧化/最古老的采金方法），后者当标签会污染知识库、拼进检索词会污染召回。
+export const SEARCHABLE_ATTRS = new Set([
+  ...INDICATORS.map(([, prop]) => prop),
+  '熔点', '沸点', '密度', '硬度', '颜色', '含量', '成分', '作者', '成句', '出处', '别名',
+  '出生', '逝世', '成立', '发行', '上映', '位置', '高度', '宽度', '深度', '厚度', '直径',
+  '长度', '销量', '市值', '股价', '注册资本', '总部', '创始人', '首都',
+]);
+
+/** 该词是否是"可检索/可当标签的属性名词"（精确命中，或包含已知属性词，如"地壳含量"） */
+export function isAttrNoun(metric) {
+  const m = String(metric || '').trim();
+  if (!m) return false;
+  if (SEARCHABLE_ATTRS.has(m)) return true;
+  for (const a of SEARCHABLE_ATTRS) if (a.length >= 2 && m.includes(a)) return true;
+  return false;
+}
+
+/**
+ * 从证据原文里挑出**最相关的一句**，作为知识库事实的 value。
+ * 必须是证据原文（片段），不能是"属实：/纠错："这类核查结论。
+ * 优先级：属性词+数值单位 > 数值单位 > 属性词 > 首句。
+ * 返回空串表示证据为空（调用方据此放弃该条）。
+ */
+export function pickFactSentence(text, opts = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const metric = String(opts.metric || '').trim();
+  const dataRe = makeDataRe(!!opts.isEn);
+  const parts = raw.split(/(?<=[。；;！!？?])/).map(s => s.trim()).filter(Boolean);
+  const list = parts.length ? parts : [raw];
+  const withData = (s) => dataRe.test(s);
+  const withMetric = (s) => metric.length >= 2 && s.includes(metric);
+  const pick =
+    list.find(s => withMetric(s) && withData(s)) ||
+    list.find(withData) ||
+    list.find(withMetric) ||
+    list[0];
+  return String(pick || '').slice(0, 300).trim();
+}
+
+/**
+ * 事实标签：优先事实自身识别出的属性名，其次断言给的属性名词，最后才是实体名。
+ * 绝不把整句断言当标签（那会让知识库按属性匹配时永远命中不了）。
+ */
+export function storeFactLabel({ property, metric, entity, value }) {
+  const p = String(property || '').trim();
+  if (p && p !== '相关数据') return p;
+  const m = String(metric || '').trim();
+  if (m && m !== '相关数据' && isAttrNoun(m)) return m;
+  const c = classifyProp(String(value || ''));
+  if (c) return c;
+  return String(entity || '').trim();
+}
+
+/**
+ * 构造一条"可入库的事实"。返回 null 表示这条不该入库（无原文/无出处）。
+ * 这是**查询链路与查证链路唯一的事实构造器**——两条链路的入库标准必须完全一致
+ * （用户明确要求），任何一边单独造事实形态都会重新引入"存进去查不出来"的问题。
+ * @param {{property?:string, metric?:string, entity?:string, evidence?:string, value?:string,
+ *          source?:object, rating?:string, isEn?:boolean, verifiedAt?:string}} o
+ *   value 已给定（查询链路的正则抽取结果）时直接用；否则从 evidence 原文里挑一句。
+ * @returns {{label:string,value:string,metric:string,rating:string,source:object,verified_at:string,confidence:string}|null}
+ */
+export function storeFactOf(o = {}) {
+  const evidence = String(o.evidence || '').trim();
+  const explicit = String(o.value || '').trim();
+  // 查询链路：正则抽取已经给出了「数据原文句」，直接用它当 value；
+  // 查证链路：只有证据全文，需要从中挑出最相关的一句。
+  // 两条链路都只用**原文片段**，绝不使用模型生成的结论性文字。
+  const value = explicit || (evidence ? pickFactSentence(evidence, { metric: o.metric, isEn: o.isEn }) : '');
+  if (!value) return null;
+  const label = storeFactLabel({ property: o.property, metric: o.metric, entity: o.entity, value });
+  if (!label) return null;
+  const src = o.source || {};
+  if (!src.url) return null;
+  return {
+    label,
+    value,
+    metric: String(o.metric || ''),
+    rating: o.rating || 'high',
+    source: {
+      name: src.name || '',
+      url: src.url || '',
+      official_tag: !!src.official_tag,
+      official_score: src.official_score != null ? src.official_score : (src.official_tag ? 0.9 : 0.5),
+    },
+    verified_at: o.verifiedAt || new Date().toISOString().slice(0, 10),
+    confidence: o.rating || 'high',
+  };
+}
+
+/**
+ * 从一条断言的**检索结果**里挑出最优来源（官方性最高的一条，且必须是可引用的真实页面）。
+ * @returns {object|null} {name,url,official_tag,official_score}
+ */
+export function bestCitableSource(results) {
+  const list = (Array.isArray(results) ? results : [])
+    .filter(r => r && r.url && isCitableSource(r));
+  if (list.length === 0) return null;
+  const sorted = list.slice().sort((a, b) => (b.official_score || 0) - (a.official_score || 0));
+  const top = sorted[0];
+  return {
+    name: top.title || top.site_name || '',
+    url: top.url,
+    official_tag: !!top.official_tag,
+    official_score: top.official_score != null ? top.official_score : (top.official_tag ? 0.9 : 0.5),
+  };
+}

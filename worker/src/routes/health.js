@@ -22,27 +22,35 @@ export async function handleHealth(request, env) {
   // 检索源探针：各源真实搜一次，报告结果数/耗时/错误原因
   const url = new URL(request.url);
   if (url.searchParams.get('probe') === '1') {
+    // ?q=<检索词> 用指定检索词探针——排查"某个具体查询召不到结果"时用它，
+    // 成本远低于反复打 /api/check（不耗 LLM、不占用户额度）。缺省用样例词。
+    const q = (url.searchParams.get('q') || '').trim();
+    const qWiki = q || '大熊猫';
+    const qWeb = q || '大熊猫 身高';
     const probe = {};
+    const samples = {};
     const test = async (name, fn) => {
       const t0 = Date.now();
       try {
         const r = await fn();
-        const n = Array.isArray(r) ? r.length : (r?.results?.length ?? -1);
-        probe[name] = { ok: n > 0, results: n, ms: Date.now() - t0 };
+        const list = Array.isArray(r) ? r : (r?.results || []);
+        probe[name] = { ok: list.length > 0, results: list.length, ms: Date.now() - t0 };
+        if (q) samples[name] = list.slice(0, 5).map(x => `${x.title || ''} <${x.source || ''}>`);
       } catch (e) {
         probe[name] = { ok: false, error: String(e.message || e).slice(0, 120), ms: Date.now() - t0 };
       }
     };
     await Promise.all([
-      test('wikipedia', () => wikiSearch('大熊猫', 3, '')),
-      test('duckduckgo', () => ddgSearch('大熊猫 身高', 5)),
-      test('searxng', () => searxSearch('大熊猫', 5)),
-      test('bing', () => bingWebSearch('大熊猫 身高', 5)),
-      test('tavily', () => tavilySearch('giant panda', {
-        apiKey: env.TAVILY_KEY, topK: 3, searchDepth: 'basic',
+      test('wikipedia', () => wikiSearch(qWiki, 3, '')),
+      test('duckduckgo', () => ddgSearch(qWeb, 5)),
+      test('searxng', () => searxSearch(qWiki, 5)),
+      test('bing', () => bingWebSearch(qWeb, 5)),
+      test('tavily', () => tavilySearch(qWeb, {
+        apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'basic',
       })),
     ]);
     data.probe = probe;
+    if (q) data.samples = samples;
   }
 
   return jsonResponse({ ok: true, data }, 200, request);

@@ -50,15 +50,40 @@ export function entityTermOf(query) {
   return q || query;
 }
 
+// 断言句 → 内容二元组（"主体严格匹配全灭"时的兜底判据）。
+// 剔掉含虚字的二元组，避免"的了是在""与及和"这类公共串让任意结果都算相关。
+const FUNC_CHAR = new Set('的了是在有和与及这那它他她我你您们个中于对从把被而且并或则也就都还只不没很将会能可要上下内外前后同时以之类其此等并'.split(''));
+function contentBigrams(text) {
+  const s = normZh(text || '').replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '');
+  const out = [];
+  for (let i = 0; i < s.length - 1; i++) {
+    const bg = s.slice(i, i + 2);
+    if (!/[\u4e00-\u9fa5]{2}/.test(bg)) continue;
+    if (FUNC_CHAR.has(bg[0]) || FUNC_CHAR.has(bg[1])) continue;
+    if (!out.includes(bg)) out.push(bg);
+  }
+  return out;
+}
+
 /**
  * 相关性过滤：结果必须与查询实体相关
  * - 去掉数字/年份得到核心词（"2025年国内生产总值"→"国内生产总值"）
  * - 百科类（维基/百科）：标题必须含核心词（否则只是正文顺带提及，如"犬"文中提到大熊猫 → 剔除）
  * - 其它来源（官方站/网页）：标题或正文含核心词，或核心词二元组覆盖率≥60%（容忍措辞/年份差异）
+ *
+ * @param {Array}  results 检索结果
+ * @param {string} entity  断言主体
+ * @param {Object} [opts]
+ * @param {boolean} [opts.strictName] 短专名只认"完整实体词出现"（逐点核查链路传 true；
+ *        查询链路不传，避免误杀导致答非所问）
+ * @param {string}  [opts.claimText]  兜底判据：主体严格匹配**全灭**时，改用"断言完整句"
+ *        的内容二元组重叠度判定。用于历史术语/别称场景——断言说"可燃空气"（=氢气），
+ *        而正文用的是现代名称"氢气"，按字面匹配必然全灭。
  */
-export function filterRelevant(results, entity) {
+export function filterRelevant(results, entity, opts = {}) {
   const list = Array.isArray(results) ? results : [];
   const raw = normZh(entity || '').trim();
+  const strictName = !!opts.strictName;
   if (!raw) return list;
   // 去掉数字、年份、百分号、常见时间字，得到用于匹配的核心词
   const core = raw
@@ -93,6 +118,15 @@ export function filterRelevant(results, entity) {
     if (/[\u4e00-\u9fa5]{2}/.test(bg)) bigrams.push(bg);
   }
   const latinTokens = (core.match(/[A-Za-z]{2,}/g) || []).map(t => t.toLowerCase());
+
+  // 短专名（2-5 字中文实体，或含间隔号的外文音译名）在 strictName 下**不做二元组近似放行**。
+  // 二元组覆盖率对"近名异实体"完全无效：实体"普里斯特"的三个二元组
+  // （普里 / 里斯 / 斯特）能在"普里斯特菲尔德球场"里全中，覆盖率 1.0，
+  // 却与断言（普里斯特利制可燃空气）毫无关系——正是这种假阳性让 LLM
+  // 拿无关证据编出"应为…而非…"的纠错。
+  // 这类实体要求**完整实体词**出现在标题或摘要里；做不到就判无关，
+  // 宁可走"查无实据"（诚实），也不放无关证据进去（会编造）。
+  const isShortProperName = strictName && (/[·・]/.test(raw) || (core.length >= 2 && core.length <= 5));
 
   // 中文国名 → 外文名称（外国数据英文页标题不含中文国名，需等价放行，否则被误过滤）
   const REGION_EN = {
@@ -169,7 +203,7 @@ export function filterRelevant(results, entity) {
     return regionHit && econHit;
   };
 
-  return list.filter(r => {
+  const pass = (r) => {
     const title = normZh(r.title || '');
     const isBaike = /wikipedia|baike|wiki/i.test(`${r.source || ''} ${r.url || ''}`);
     if (title.includes(core)) return true;
@@ -177,7 +211,29 @@ export function filterRelevant(results, entity) {
     // 外文百科（如 Economy of the United States）不含中文核心词，但含外文国名+经济指标 → 放行
     if (regionEnMatch(hayAll)) return true;
     if (isBaike) return false; // 百科标题不含核心词 → 仅顺带提及，剔除
-    if (hayAll.includes(core) || coverage(hayAll) >= 0.6) return true;
+    if (hayAll.includes(core)) return true;
+    // 短专名只认"完整实体词出现"，不做覆盖率近似（见上 isShortProperName 说明）
+    if (isShortProperName) return false;
+    if (coverage(hayAll) >= 0.6) return true;
+    return false;
+  };
+
+  const out = list.filter(pass);
+  if (out.length > 0) return out;
+
+  // ---- 兜底：主体按字面匹配全灭 → 改用"断言整句"的内容重叠度判定 ----
+  // 场景：断言用了历史术语/别称（"可燃空气"＝氢气、"脱燃素空气"＝氮气），
+  // 而正文一律用现代名称 → 按"可燃空气"匹配必然 0 条，报告就成了"查无实据"。
+  // 判据：结果中含**≥3 个**断言句的内容二元组（含虚字的二元组已剔除）。
+  // 阈值取 3 是有意的保守值——单个公共二元组（如"空气""产生"）随意一个页面都能撞上，
+  // 3 个不同的实词二元组同时出现，才足以说明这一页确实在讲同一件事。
+  if (!opts.claimText) return out;
+  const claimBgs = contentBigrams(opts.claimText);
+  if (claimBgs.length < 3) return out;
+  return list.filter(r => {
+    const hay = normZh(`${r.title || ''} ${r.snippet || ''}`);
+    let hit = 0;
+    for (const bg of claimBgs) if (hay.includes(bg)) { hit++; if (hit >= 3) return true; }
     return false;
   });
 }

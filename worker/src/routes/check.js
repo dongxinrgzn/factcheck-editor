@@ -287,7 +287,7 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
  *   （数值应交给评级环节比对，不该作为检索词）
  * - metric 为空 → 用 claim 去掉数值后作为检索词
  */
-function buildSearchQuery(claim) {
+export function buildSearchQuery(claim) {
   const entity = (claim.entity || '').trim();
   const metric = (claim.metric || '').trim();
 
@@ -307,6 +307,27 @@ function buildSearchQuery(claim) {
     const metricWord = /\d/.test(metric) ? stripNumbers(metric) : metric;
     if (metricWord && metricWord !== entity && isSearchableAttr(metricWord)) {
       return expandQueryWithAttrSynonyms(`${entity} ${metricWord}`, metricWord);
+    }
+    // metric 不是属性名词（整句谓语/事件描述）→ 检索词会退化成**纯实体**。
+    //   ① 叙事型断言（描述事件/过程/因果）：用**整句断言**做检索词，信息量最大。
+    //      实测"可燃空气 铁制容器 点燃 爆鸣声"只召回《五羰基铁》《烟花爆竹》这类噪音，
+    //      而整句"可燃空气与空气通入铁制容器中混合点燃 能产生剧烈的爆鸣声"能直接召回
+    //      《ICSC 0001 - 氢》《氫氣-維基百科》——Tavily 对自然语言长句理解很好。
+    //   ② 短断言（如"金是金黄色的"）：整句没有额外信息，加关键词反而稀释召回 → 退回实体。
+    const claimText = String(claim.claim || '').replace(/[“”"']/g, ' ').replace(/\s+/g, ' ').trim();
+    if (claimText.length >= 12 && claimText !== entity) return claimText;
+
+    // 短断言的实体若为人名/事件名，只拿实体去搜必然召回归名噪音
+    // （"普里斯特" → 普里斯特菲尔德球场/小说家约翰·博因顿·普里斯特利），
+    // 用抽取出的 keywords 补语境关键词（术语/别称/年代/事件名），把检索定向到正确主题。
+    const kws = String(claim.keywords || '').trim();
+    if (kws) {
+      const extra = kws
+        .split(/[\s、,，+/／]+/)
+        .map(s => s.trim())
+        .filter(s => s && s !== entity && !entity.includes(s) && !/\d/.test(s))
+        .slice(0, 3);
+      if (extra.length) return `${entity} ${extra.join(' ')}`;
     }
     return entity;
   }
@@ -411,6 +432,20 @@ function ratingEn(r) {
   if (r == null) return 'medium';
   const k = String(r).trim();
   return RATING_EN[k] || 'medium';
+}
+
+/**
+ * 纠错文本净化（prompt 之外的第二道闸门）。
+ * 实测模型仍会把「证据没有具体提到 X」写成 correction —— 那不是断言有误，
+ * 只是**没有证据**。留着它等于向用户暗示断言有问题，必须丢弃。
+ * 只保留能说出**具体冲突点**的纠错（时间/数值/归属/因果对不上）。
+ */
+const NO_MENTION_RE = /但(?:是)?(?:也|并)?(?:没有|未|不曾)(?:具体)?(?:提到|提及|说明|给出|记载|涉及)|证据(?:中|里)?(?:并|也)?(?:没有|未)(?:具体)?(?:提到|提及|说明|涉及)|未能?(?:明确)?找到(?:相关)?(?:证据|资料)|(?:断言|证据)(?:中|里)?(?:未|没有)(?:明确)?(?:说明|提及)/;
+export function sanitizeCorrection(c) {
+  const s = String(c || '').trim();
+  if (!s) return '';
+  if (NO_MENTION_RE.test(s)) return '';
+  return s;
 }
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
@@ -969,7 +1004,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       // 否则一次检索失败会被缓存 30 天，后续请求永远拿不到兜底机会。
       // 同时校验相关性：早期写入的无关结果集（单字实体过滤缺失所致）直接作废。
       if (cached && Array.isArray(cached) && cached.length > 0) {
-        const cacheOk = !entity2 || filterRelevant(cached, entity2).length > 0;
+        const cacheOk = !entity2 || filterRelevant(cached, entity2, { strictName: true, claimText: c.claim }).length > 0;
         if (cacheOk) {
           return { claim: c, query: sq, results: cached, cached: true, fromKB: false };
         }
@@ -986,7 +1021,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         if (!skipSearchFallback) {
           // 检索结果与实体完全不相关 → 强制全网兜底一次
           if (entity2 && raw.length > 0) {
-            const relevant = filterRelevant(raw, entity2);
+            const relevant = filterRelevant(raw, entity2, { strictName: true, claimText: c.claim });
             if (relevant.length === 0) {
               const forced = await braveSearchForce(sq, 5, env.TAVILY_KEY);
               if (forced.length > 0) raw = forced;
@@ -1007,7 +1042,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         // 结果照常返回给右侧"检索结果"面板（对用户透明），但评级链路会
         // 在相关性闸门处判为"查无实据"，不会拿它当证据编纠错。
         const stillIrrelevant = entity2 && annotated.length > 0
-          && filterRelevant(annotated, entity2).length === 0;
+          && filterRelevant(annotated, entity2, { strictName: true, claimText: c.claim }).length === 0;
         if (annotated.length > 0 && !stillIrrelevant) {
           await cacheSet(env.FACT_CACHE, cacheK, annotated, SEARCH_TTL);
         }
@@ -1050,7 +1085,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 无关即视为"查无实据"：不出 correction（前端只显示"未检索到可引用证据"），
     // 同时删掉这份检索缓存，让下次同问重新检索，坏结果不再被缓存固化一整天。
     const relEntity = (sr.claim?.entity || '').trim();
-    const relevant = relEntity ? filterRelevant(sr.results, relEntity) : sr.results;
+    // strictName：短专名（人名/物名）只认完整实体词，挡住"普里斯特→普里斯特菲尔德球场"式假阳性。
+    // claimText：历史术语（"可燃空气"=氢气）按字面匹配必然全灭时的兜底判据。
+    const relevant = relEntity
+      ? filterRelevant(sr.results, relEntity, { strictName: true, claimText: sr.claim?.claim })
+      : sr.results;
     if (relevant.length === 0) {
       try { await cacheDelete(env.FACT_CACHE, searchCacheKey(sr.query)); } catch {}
       return {
@@ -1081,7 +1120,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           claim: sr.claim,
           rating: cachedRate.rating,
           evidence: cachedRate.evidence,
-          correction: cachedRate.correction || '',
+          correction: sanitizeCorrection(cachedRate.correction),
           sources: sr.results,
           fromKB: false,
           fromCache: true,
@@ -1101,9 +1140,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         if (r && typeof r === 'object') {
           // LLM 用中文输出（高/中/低），此处立即归一化为英文，
           // 保证下游所有 === 'high' 判断与入库门槛能正常生效。
-          const norm = { rating: ratingEn(r.rating), evidence: r.evidence, correction: r.correction || '' };
+          const norm = { rating: ratingEn(r.rating), evidence: r.evidence, correction: sanitizeCorrection(r.correction) };
           await cacheSet(env.FACT_CACHE, rateK, norm, RATING_TTL);
-          return { claim: sr.claim, ...r, rating: norm.rating, sources: sr.results, fromKB: false };
+          // ⚠️ 这里必须显式覆盖 correction：`...r` 会把模型原始 correction 带出来，
+          // 使上面刚净化过的值被悄悄还原（评级缓存里是净化的、返回给用户的是原始的）。
+          return { claim: sr.claim, ...r, rating: norm.rating, correction: norm.correction, sources: sr.results, fromKB: false };
         }
         lastErr = 'LLM 返回空';
       } catch (e) {

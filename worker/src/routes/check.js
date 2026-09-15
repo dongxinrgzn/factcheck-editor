@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL } from '../utils/cache.js';
+import { cacheGet, cacheSet, cacheDelete, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -533,6 +533,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   let tSearchDone = 0;
   let tLlmDone = 0;
   let searchResults = null;
+  // 记录本次实际使用的检索缓存键：查询若最终"无结果"，用它删掉那份坏缓存（见下方自愈）
+  let usedSearchCacheKey = null;
   // 官方站检索（Tavily site:gov.cn）与主检索**并行**发起：两者互不依赖，
   // 串行会让总耗时叠加 ~5s（实测冷查询 16-18s → 并行后明显下降）。
   // 官方结果照旧不缓存（避免限流空结果被固化），在主检索之后再合并。
@@ -541,6 +543,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     : Promise.resolve([]);
   try {
     const cacheK = searchCacheKey(searchQuery + '|card');
+    usedSearchCacheKey = cacheK;
     const cached = await cacheGet(env.FACT_CACHE, cacheK);
     if (cached) {
       searchResults = cached;
@@ -798,6 +801,14 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           } catch {}
         }
       }
+    }
+
+    // 自愈：拿到证据却得出"没结果"（低置信 + 零事实点）→ 删掉这次的检索缓存。
+    // 检索源时好时坏，某次抖动返回的无关结果集若被缓存，同一次提问在 TTL 内
+    // 会一直得到"未检索到"（实测"雪豹 体长"缓存里就是一份坏结果，而"雪豹 身长"
+    // 走新检索立刻出正确数据）。删掉后用户再问一次即可重新检索。
+    if (usedSearchCacheKey && confidence === '低' && factCard.facts.length === 0) {
+      try { await cacheDelete(env.FACT_CACHE, usedSearchCacheKey); } catch {}
     }
 
     return {

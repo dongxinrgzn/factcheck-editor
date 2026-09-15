@@ -2,7 +2,7 @@
 
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
-import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify } from '../utils/kbStore.js';
+import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify, backupKB } from '../utils/kbStore.js';
 import { clearAllCache, clearKBCache } from '../utils/cache.js';
 import { runCheck } from './check.js';
 
@@ -115,7 +115,14 @@ export async function handleKbSubmit(request, env) {
   if (action === 'delete') {
     const { slug } = body;
     if (!slug) return errorJson('slug 字段必填', 400, 'BAD_REQUEST', request);
-    const result = await deleteEntry(env.FACT_KB, slug);
+    // 传 auditKv：删除留痕到 FACT_CACHE（kbaudit:del:*），便于事后追溯
+    const result = await deleteEntry(env.FACT_KB, slug, env.FACT_CACHE, isAdmin ? 'admin' : 'curator');
+    return jsonResponse({ ok: true, data: result }, 200, request);
+  }
+
+  // 手动触发知识库全量备份（正常由每日定时任务自动执行）
+  if (action === 'backup') {
+    const result = await backupKB(env.FACT_KB, env.FACT_CACHE);
     return jsonResponse({ ok: true, data: result }, 200, request);
   }
 

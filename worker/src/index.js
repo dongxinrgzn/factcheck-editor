@@ -8,8 +8,20 @@ import { handleVerifyAncient } from './routes/verifyAncient.js';
 import { handleKbQuery } from './routes/kbQuery.js';
 import { handleKbSubmit, handleKbEntry } from './routes/kbSubmit.js';
 import { handleHealth } from './routes/health.js';
+import { backupKB } from './utils/kbStore.js';
 
 export default {
+  // 定时任务：每天把知识库快照备份到 FACT_CACHE（与 KB 不同命名空间，
+  // KB 若被清空备份仍在）。历史上出现过词条无声消失，故加这道保险。
+  async scheduled(event, env, ctx) {
+    try {
+      const r = await backupKB(env.FACT_KB, env.FACT_CACHE);
+      console.log('KB backup:', JSON.stringify(r));
+    } catch (e) {
+      console.log('KB backup failed:', e.message);
+    }
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;

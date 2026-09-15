@@ -36,6 +36,10 @@ id = "112efd0ff26c40c08b008fb602047f15"
 #   - verifyAncient.js：诗词类文本跳过 searchClassic 的 7 部书遍历、maxClaims=6、skipSearchFallback=true
 #   - check.js：mapLimit 限并发、空结果不入缓存（避免一次抖动污染 30 天）
 
+# 每日 19:00 UTC（= 北京时间 03:00）把知识库快照备份到 FACT_CACHE（防无声丢失）
+[triggers]
+crons = ["0 19 * * *"]
+
 [vars]
 LLM_PROVIDER = "siliconflow"
 LLM_MODEL = "Qwen/Qwen2.5-72B-Instruct"

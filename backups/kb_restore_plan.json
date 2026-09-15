@@ -1,0 +1,1151 @@
+{
+ "dm1jc": {
+  "key": "kb:hist:dm1jc:2",
+  "card": {
+   "title": "大熊猫",
+   "aliases": [],
+   "category": "自动",
+   "facts": [
+    {
+     "label": "相关数据",
+     "value": "答：大熊猫的头看起来大，但它的脑并不发达，其脑容量只有310—320毫升，比野熊的脑容量还少60毫升",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/506483.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "在野外环境里，大熊猫的食物里只有约1%的部分会吃竹子以外的其他植物与动物",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/506483.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "重量",
+     "value": "答：据统计，成年大熊猫每天排便40多次，排出的粪便在120团左右，若吃竹笋，排出的粪便为150团，每团粪便的重量约100克，每天排出粪便的总量约为15—20千克",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/506483.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "体重",
+     "value": "野生大熊猫的体重为60—73千克",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/581527.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "体重",
+     "value": "人工饲养的大熊猫体重为80—125千克，最重的达180千克",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/581527.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "大熊猫肩高650—750毫米，臀高640—650毫米",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/581527.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "体长",
+     "value": "体长一般在1200—1800毫米",
+     "rating": "high",
+     "source": {
+      "name": "国家林草局",
+      "url": "https://www.forestry.gov.cn/c/www/zhzs/581527.jhtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "”谌利民介绍，在修复与退出方面，四川省累计投入28.85亿元，实现200宗矿业权、270座小水电退出，修复栖息地超34万亩",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.ndrc.gov.cn/wsdwhfz/202606/t20260618_1405986.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "大熊猫栖息于海拔2000—3500米的森林中，主要以竹类植物为食，是昼夜兼行的独栖动物",
+     "rating": "high",
+     "source": {
+      "name": "大熊猫",
+      "url": "https://zh.wikipedia.org/?curid=308464",
+      "official_tag": false,
+      "official_score": 0.5
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "为节约能量开支，大熊猫每日甚少走动，一日的活动距离仅为600米-1500米左右",
+     "rating": "high",
+     "source": {
+      "name": "大熊猫",
+      "url": "https://zh.wikipedia.org/?curid=308464",
+      "official_tag": false,
+      "official_score": 0.5
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "即便雪暴来临，其活动距离也仅为4000米左右",
+     "rating": "high",
+     "source": {
+      "name": "大熊猫",
+      "url": "https://zh.wikipedia.org/?curid=308464",
+      "official_tag": false,
+      "official_score": 0.5
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "大熊猫的历史_国家林业和草原局政府网",
+     "url": "https://www.forestry.gov.cn/c/www/dzw/579507.jhtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "认识大熊猫（二）_国家林业和草原局政府网",
+     "url": "https://www.forestry.gov.cn/c/www/zhzs/506483.jhtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "大熊猫的外形特征_国家林业和草原局政府网",
+     "url": "https://www.forestry.gov.cn/c/www/zhzs/581527.jhtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "大熊猫科普｜大熊猫野外种群数量有多少？_国家林业和草原局政府网",
+     "url": "https://www.forestry.gov.cn/c/www/zhzs/564298.jhtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "科普 | 大熊猫野化放归_国家林业和草原局政府网",
+     "url": "https://www.forestry.gov.cn/c/www/kp/578389.jhtml",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "dm1jc",
+   "version": 2,
+   "updated_at": "2026-09-14T02:22:54.143Z",
+   "created_at": "2026-09-11T09:23:41.645Z",
+   "curator": "auto_audit"
+  }
+ },
+ "gdnw5": {
+  "key": "kb:hist:gdnw5:1",
+  "card": {
+   "title": "水沸点",
+   "aliases": [],
+   "category": "自动",
+   "facts": [
+    {
+     "label": "相关数据",
+     "value": "加热到290℃时开始释放出三氧化硫，最终 变成为98.54%的水溶液， 在317℃时沸腾而成为共沸混 合物",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "浓硝酸含量为68%左右，易挥发，在空气中产生 白雾（与浓盐酸相同），是硝酸蒸汽（一般来说是浓硝 酸分解出来的二氧化氮） 与水蒸汽结合而形成的硝酸小 液滴",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "相对密度(d204)1.41， 熔点-42℃ （无水） ]， 沸点120.5℃ （68%）",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "可加入0.6%～1%的乙醇作稳定剂",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "蒸气能与空气形成爆炸性混合物， 爆炸极限1.2%～ 7.0% （体积）",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "在一个标准大气压下水的沸点是100 摄氏度，压力越高,与之对应 压力下的沸点越高，这里是高压蒸汽锅,说明压力肯定大于一个标准大 气压(通常情况下的地表面的大气压强就认为是一个标准大气压)，也就 是说高压蒸汽锅肯定要超过100 摄氏度才能沸腾，才能产生蒸汽",
+     "rating": "high",
+     "source": {
+      "name": "高校/教育机构",
+      "url": "https://labshare.sicau.edu.cn/Uploads/News/c9a80264-119e-418e-90c7-398238b41619/insertfile/2306011152540fa.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "三是湿热的蒸汽有潜热存在，每1 克水在100℃时，由气态变为液 态时可放出2.26kJ 的热量",
+     "rating": "high",
+     "source": {
+      "name": "高校/教育机构",
+      "url": "https://labshare.sicau.edu.cn/Uploads/News/c9a80264-119e-418e-90c7-398238b41619/insertfile/2306011152540fa.pdf",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "Untitled - 广州市生态环境局",
+     "url": "http://sthjj.gz.gov.cn/attachment/7/7899/7899430/10469376.pdf",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "[PDF] 建设项目环境影响报告表",
+     "url": "http://zjjcmspublic.oss-cn-hangzhou-zwynet-d01-a.internet.cloud.zj.gov.cn/jcms_files/jcms1/web3249/site/picture/old/P020181128408310500906.pdf",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "水的沸点不再是100℃ - 大学化学",
+     "url": "https://www.dxhx.pku.edu.cn/CN/10.3866/PKU.DXHX19920614",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "从分子的角度理解水的沸腾 水是生命之源，和我们的日常生活息息相关。我们用水洗衣做饭，可以说我们对水是最",
+     "url": "https://moodle.scnu.edu.cn/pluginfile.php/54550/mod_page/intro/化学动力学.pdf",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "热力学第二定律一个间接的实验证据",
+     "url": "https://zlxb.zafu.edu.cn/article/id/2804",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "gdnw5",
+   "version": 1,
+   "updated_at": "2026-09-11T07:27:10.690Z",
+   "created_at": "2026-09-11T07:27:10.690Z",
+   "curator": "auto_audit"
+  }
+ },
+ "hlxut0": {
+  "key": "kb:hist:hlxut0:1",
+  "card": {
+   "title": "珠穆朗玛峰高度",
+   "aliases": [],
+   "category": "自动",
+   "facts": [
+    {
+     "label": "相关数据",
+     "value": "1975年7月23日，中国正式向世界庄严宣布珠峰高程测量结果为8848.13米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "关于珠峰的高度，罗则进行了解释：1975年，首次成功测得的珠穆朗玛峰高度为8848.13米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "2005年，第二次测得高度为8844.43米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "2020年，第三次测得高度为8848.86米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "这一天，中国的9名勇士再次胜利登上珠穆朗玛峰，首次将测量觇标立于珠峰之顶，精准测得珠峰海拔高度为8848.13米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "2005年，西藏自治区登山队重新测得珠峰高程为8844.43米，这是国际珠峰高程测量最精确的数据",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "1993年至2007年，西藏自治区登山队历经14年不懈努力，成功实现“以一支队伍形式登顶世界14座海拔8000米以上高峰”的伟大壮举，次仁多吉、边巴扎西和洛则三位队员成为登上14座高峰的英雄，也让中国成为世界上第一个以团队形式登顶14座高峰的国家",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "特别值得一提的是，1999年，从珠峰顶上点燃第六届全国少数民族传统体育运动会圣火火种时，西藏自治区登山队创造了多项纪录：桂桑成为首位两次登顶珠峰的女性，仁那、吉吉成为登顶珠峰的第一对夫妻，边巴扎西是从海拔8300米突击登顶珠峰最快者，并创造了没有避寒设施情况下在珠峰顶上停留138分钟的纪录",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "尤其对于女英雄桂桑来说，这本该是她个人第三次登顶珠峰，因为她也参加了1975年的登顶珠峰活动，并到达了8600米的高度",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "”回忆起那次意外，68岁的桂桑语气里依然充满了遗憾",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "让我们跟随记者的镜头，飞翔在空中远眺珠峰，从海拔5200米到海拔8400米的不同高度，观赏喜马拉雅山脉的雄伟壮丽",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://wlt.xizang.gov.cn/xwzx_69/xydt/202306/t20230602_358809.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "海拔",
+     "value": "1975年之前，我国一直使用8882米作为珠峰的海拔高度，这一数据便是来自他国的观测",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://zrzyt.xinjiang.gov.cn/xjgtzy/mtxc/202505/a4d93aba84674444b47e3225f7e278a6.shtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "登顶珠峰：更高更远永无止境_西藏自治区人民政府",
+     "url": "https://www.xizang.gov.cn/xwzx_406/bmkx/202507/t20250731_492889.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "天空之眼瞰珠峰：在海拔数千米高空远眺珠峰，是什么样的体验？",
+     "url": "https://wlt.xizang.gov.cn/xwzx_69/xydt/202306/t20230602_358809.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "追问地球之巅——记我国珠峰高程测量历程_媒体宣传_新疆维吾尔自治区自然资源厅",
+     "url": "https://zrzyt.xinjiang.gov.cn/xjgtzy/mtxc/202505/a4d93aba84674444b47e3225f7e278a6.shtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "答记者问 - 国务院新闻办公室",
+     "url": "http://www.scio.gov.cn/xwfb/gwyxwbgsxwfbh/wqfbh_2284/2005n_13434/2005n10y09r/202207/t20220715_157776.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "北凌绝顶——1960年中国首次登顶珠穆朗玛峰始末-中央纪委网站",
+     "url": "http://m.ccdi.gov.cn/content/b5/47/50280.html",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "hlxut0",
+   "version": 1,
+   "updated_at": "2026-09-11T07:26:56.136Z",
+   "created_at": "2026-09-11T07:26:56.136Z",
+   "curator": "auto_audit"
+  }
+ },
+ "kh87cv": {
+  "key": "kb:hist:kh87cv:2",
+  "card": {
+   "title": "黄河千米",
+   "aliases": [],
+   "category": "自动",
+   "facts": [
+    {
+     "label": "面积",
+     "value": "黄河全长约5464千米,流域总面积79.5万平方千米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://slt.hubei.gov.cn/slkp/slcs/202509/t20250905_5764368.shtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "黄河是中华民族的母亲河,发源于青藏高原,流经9个省区,全长5464千米,流域面积79.5万平方千米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.igm.cgs.gov.cn/dwdt_2908/202012/t20201207_659886.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "黄河是连接青藏高原、黄土高原和华北平原的重要物质和能量通道，全长5464千米，是我国第二、世界第五长河，流域总面积79 [...] .5万平方千米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://www.yrcc.gov.cn/hdjl/jypl/202501/t20250115_439201.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "黄河是中国第二大河，中华民族的母亲河，全长5464千米，而小清河作为南宋时期开凿的运盐河，全长只有237千米",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://www.yrcc.gov.cn/hhwh/wxyc/202312/t20231220_373351.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "截至当日10时，黄河累计封冻长度679.1千米，其中上游封冻637千米，中游封冻42.1千米，全河凌情整体平稳可控",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://www.yrcc.gov.cn/xwdt/mtgz/202601/t20260123_448076.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "全长5464公里",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://swj.jcgov.gov.cn/ztzl/slkp/slzyzs/202209/t20220921_1670061.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "黄河上游:河长3472千米,流域面积占全黄河总量的51.3%",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://swj.jcgov.gov.cn/ztzl/slkp/slzyzs/202209/t20220921_1670061.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "上游河段年来沙量仅占全河年来沙量的8%,水多沙少,是黄河的清水来源",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://swj.jcgov.gov.cn/ztzl/slkp/slzyzs/202209/t20220921_1670061.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "黄河中游:河长1206千米,流域面积占全黄河总量的45.7%,区间增加的水量占黄河水量的42.5%,增加沙量占全黄河沙量的92%,是黄河泥沙的主要来源",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://swj.jcgov.gov.cn/ztzl/slkp/slzyzs/202209/t20220921_1670061.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "黄河下游:河长786千米,流域面积占全黄河总量的3%,区间增加的水量占黄河水量的3.5%",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://swj.jcgov.gov.cn/ztzl/slkp/slzyzs/202209/t20220921_1670061.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "面积",
+     "value": "小浪底水利枢纽位于黄河三门峡水利枢纽下游130千米，河南省洛阳以北40千米的黄河干流上，控制流域面积69.4万平方千米，占黄河流域面积的92.3％",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://slt.hubei.gov.cn/slkp/slcs/202605/t20260526_5944120.shtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "光阴似箭，3亿多年过去了，随着地壳剧烈运动，大量风沙纷纷扬扬，在数十万平方千米的陕甘宁盆地次第降落，积累成近200米厚的黄土层，逐渐形成了广袤无垠的黄土高原",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://www.yrcc.gov.cn/hhwh/wxyc/202503/t20250304_440295.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "为什么说黄河是中华民族的母亲河？ - 湖北省水利厅",
+     "url": "http://slt.hubei.gov.cn/slkp/slcs/202509/t20250905_5764368.shtml",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "黄河流域生态子专题上线地质云",
+     "url": "https://www.igm.cgs.gov.cn/dwdt_2908/202012/t20201207_659886.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "黄河全流域科学考察的几点认识和思考",
+     "url": "http://www.yrcc.gov.cn/hdjl/jypl/202501/t20250115_439201.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "小清河与黄河的故事",
+     "url": "http://www.yrcc.gov.cn/hhwh/wxyc/202312/t20231220_373351.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "人民日报：黄河累计封冻长度679.1千米",
+     "url": "http://www.yrcc.gov.cn/xwdt/mtgz/202601/t20260123_448076.html",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "kh87cv",
+   "version": 2,
+   "updated_at": "2026-09-11T07:33:29.038Z",
+   "created_at": "2026-09-11T07:26:39.870Z",
+   "curator": "auto_audit"
+  }
+ },
+ "reqs": {
+  "key": "kb:hist:reqs:3",
+  "card": {
+   "title": "鲁迅",
+   "aliases": [],
+   "category": "自动",
+   "facts": [
+    {
+     "label": "相关数据",
+     "value": "加上印工、装订等因素，宣纸本每百本成本为50元，抄更纸为30元",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.shda.gov.cn/dawh/dacq/202512/t20251218_76406.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "10月12日，第二次寄给曹靖华的纸张被退回，付寄费15元5角",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.shda.gov.cn/dawh/dacq/202512/t20251218_76406.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "1934年，他从所得百余幅木刻中挑选出59幅，交由日本东京洪洋社以珂罗版精印300部，是为《引玉集》，所付工料等费用计340元",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://www.shda.gov.cn/dawh/dacq/202512/t20251218_76406.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "13岁那年，他原来在京城做官的祖父因科举舞弊案锒铛入狱，此后他的父亲又长期患病，终致死亡，家境败落了下来，因此卖了房子",
+     "rating": "high",
+     "source": {
+      "name": "高校/教育机构",
+      "url": "https://www.edu.cn/personage_11520/20110824/t20110824_673384.shtml",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "教育部办公厅关于推荐高校师生观看电影《鲁迅》的通知 - 中华人民共和国教育部政府门户网站",
+     "url": "http://www.moe.gov.cn/s78/A13/s7061/201410/t20141021_178188.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "国家新闻出版署",
+     "url": "https://www.nppa.gov.cn/xxfb/ywdt/202208/t20220826_665373.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "上海档案信息网-笺纸上的文化坚守——鲁迅与木刻用纸",
+     "url": "https://www.shda.gov.cn/dawh/dacq/202512/t20251218_76406.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "国家新闻出版署",
+     "url": "https://www.nppa.gov.cn/xxfb/ywdt/202109/t20210926_665033.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "国家新闻出版署",
+     "url": "https://www.nppa.gov.cn/xxfb/ywdt/202110/t20211008_665048.html",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "reqs",
+   "version": 3,
+   "updated_at": "2026-09-14T02:20:34.446Z",
+   "created_at": "2026-09-14T02:02:27.662Z",
+   "curator": "auto_audit"
+  }
+ },
+ "ssx": {
+  "key": "kb:hist:ssx:1",
+  "card": {
+   "title": "金",
+   "aliases": [],
+   "category": "auto",
+   "facts": [
+    {
+     "key": "fact_0",
+     "label": "金是柔软的",
+     "value": "属实：纯金是有明亮光泽、黄中带红、柔软、密度高、有延展性的金属。",
+     "metric": "柔软",
+     "time": "",
+     "rating": "high",
+     "source": {
+      "name": "金",
+      "url": "https://zh.wikipedia.org/?curid=5164",
+      "official_score": 0.5,
+      "official_tag": false
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "high"
+    },
+    {
+     "key": "fact_1",
+     "label": "金的熔点约为1064℃",
+     "value": "属实：金熔点：1064.18 °C",
+     "metric": "熔点",
+     "time": "",
+     "rating": "high",
+     "source": {
+      "name": "元素熔点列表",
+      "url": "https://zh.wikipedia.org/?curid=766588",
+      "official_score": 0.5,
+      "official_tag": false
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "high"
+    },
+    {
+     "key": "fact_2",
+     "label": "金不易被氧化",
+     "value": "属实：一般認定的貴金屬包括金、銀和六個鉑族元素：釔、銠、鈀、鋨、銥和鉑，其中金、銀、鉑、鈀又被稱為貴重金屬（英語：Precious），是一類活性較低，室溫下抗氧化和耐腐蚀能力极强的金属",
+     "metric": "不易被氧化",
+     "time": "",
+     "rating": "high",
+     "source": {
+      "name": "氧化还原反应",
+      "url": "https://zh.wikipedia.org/?curid=44214",
+      "official_score": 0.5,
+      "official_tag": false
+     },
+     "verified_at": "2026-09-14",
+     "confidence": "high"
+    }
+   ],
+   "references": [
+    {
+     "name": "金",
+     "url": "https://zh.wikipedia.org/?curid=5164",
+     "official_score": 0.5
+    },
+    {
+     "name": "金缕梅",
+     "url": "https://zh.wikipedia.org/?curid=3282237",
+     "official_score": 0.5
+    },
+    {
+     "name": "金部",
+     "url": "https://zh.wikipedia.org/?curid=650628",
+     "official_score": 0.5
+    },
+    {
+     "name": "金露花",
+     "url": "https://zh.wikipedia.org/?curid=396587",
+     "official_score": 0.5
+    },
+    {
+     "name": "横纹金蛛",
+     "url": "https://zh.wikipedia.org/?curid=897229",
+     "official_score": 0.5
+    },
+    {
+     "name": "元素熔点列表",
+     "url": "https://zh.wikipedia.org/?curid=766588",
+     "official_score": 0.5
+    },
+    {
+     "name": "氧化还原反应",
+     "url": "https://zh.wikipedia.org/?curid=44214",
+     "official_score": 0.5
+    }
+   ],
+   "status": "auto_verified",
+   "id": "ssx",
+   "version": 1,
+   "updated_at": "2026-09-14T06:33:01.346Z",
+   "created_at": "2026-09-14T06:33:01.346Z",
+   "curator": "auto_audit"
+  }
+ },
+ "y20ff2": {
+  "key": "kb:hist:y20ff2:1",
+  "card": {
+   "title": "�й�2024��GDP",
+   "aliases": [],
+   "category": "auto",
+   "facts": [
+    {
+     "label": "国内生产总值",
+     "value": "According to preliminary estimates, the gross domestic product (GDP) in 2024 was 134,908.4 billion yuan, up by 5.0 percent over the previous year.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "The per capita GDP in 2024 was 95,749 yuan, up by 5.1 percent over the previous year.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "The gross national income in 2024 was 133,967.2 billion yuan, up by 5.1 percent over the previous year.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "种群数量",
+     "value": "By the end of 2024, the total number of national population reached 1,408.28 million, a decrease of 1.39 million over that at the end of 2023.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "Value-added industrial output went up 5.8 percent year on year in 2024, accelerating from 4.6 percent growth achieved in 2023.",
+     "rating": "high",
+     "source": {
+      "name": "中国政府网",
+      "url": "https://english.www.gov.cn/news/202501/18/content_WS678ae501c6d0868f4e8eeef7.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "China's GDP exceeded 100 trillion yuan in 2020, surpassed 110 trillion yuan in 2021, reached 120 trillion yuan in 2022, and exceeded 130 trillion yuan in 2024.",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://english.scio.gov.cn/pressroom/node_9014773.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "December 26, 2025 - China's 2024 gross domestic product (GDP) was revised to 134.8066 trillion yuan (about 19.16 trillion U.S.",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "http://english.scio.gov.cn/pressroom/2025-12/26/content_118248105.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "Beijing's 2024 GDP hits $683.8b, up 5.2%",
+     "rating": "high",
+     "source": {
+      "name": "地方政府部门",
+      "url": "https://invest.beijing.gov.cn/english/home/lbt/202501/t20250124_3998690.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "The annual economic growth rate for 2024 is anticipated to reach approximately 5%. with a real GDP growth rate of 5.2%, surpassing the growth target.",
+     "rating": "high",
+     "source": {
+      "name": "高校/教育机构",
+      "url": "https://www.gsm.pku.edu.cn/thought_leadership/en/info/9402/1448.htm",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "Of this total, urban permanent residents numbered 943.50 million.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "国内生产总值",
+     "value": "The GDP for the fourth quarter increased by 1.6 percent quarter on quarter. [...] 2.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202501/t20250117_1958330.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    },
+    {
+     "label": "相关数据",
+     "value": "The total value of exports was 25,454.5 billion yuan, up by 7.1 percent; the total value of imports was 18,392.3 billion yuan, up by 2.3 percent.",
+     "rating": "high",
+     "source": {
+      "name": "国家统计局",
+      "url": "https://www.stats.gov.cn/english/PressRelease/202501/t20250117_1958330.html",
+      "official_tag": true,
+      "official_score": 0.9
+     },
+     "verified_at": "2026-09-11",
+     "confidence": "高"
+    }
+   ],
+   "references": [
+    {
+     "name": "the people's republic of china",
+     "url": "https://www.stats.gov.cn/english/PressRelease/202502/t20250228_1958822.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "National Economy Witnessed Steady Progress amidst Stability with ...",
+     "url": "https://www.stats.gov.cn/english/PressRelease/202501/t20250117_1958330.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "Announcement of the National Bureau of Statistics on the Final Verification of GDP in 2024",
+     "url": "https://www.stats.gov.cn/english/PressRelease/202512/t20251230_1962210.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "China achieves 2024 growth target, bolsters global economy",
+     "url": "https://english.www.gov.cn/news/202501/18/content_WS678ae501c6d0868f4e8eeef7.html",
+     "official_tag": true,
+     "official_score": 0.9
+    },
+    {
+     "name": "China revises 2024 GDP data",
+     "url": "https://english.www.gov.cn/archive/statistics/202512/26/content_WS694e26e4c6d00ca5f9a0846e.html",
+     "official_tag": true,
+     "official_score": 0.9
+    }
+   ],
+   "confidence_tier": "高",
+   "status": "auto_verified",
+   "id": "y20ff2",
+   "version": 1,
+   "updated_at": "2026-09-11T03:39:57.706Z",
+   "created_at": "2026-09-11T03:39:57.706Z",
+   "curator": "auto_audit"
+  }
+ }
+}

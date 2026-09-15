@@ -88,13 +88,28 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     const attrWords = metric
       ? metric.split(/[\s、,，+/和与及]+/).map(w => w.trim()).filter(w => w.length >= 2)
       : [];
+    // 属性近义匹配（口径与检索扩展/数据卡过滤一致，见 ATTR_SYNONYMS）：
+    //  - 标签匹配：问"身高"时库里的"体长/肩高"类标签也算命中（动物身高≈肩高/体长）
+    //  - 值匹配：仅对**通用标签**（相关数据/其他…）的事实生效，防止"粪便重量"被当体重
     const labelHit = (f, word) => {
       const lbl = (f.label || '').trim();
       return lbl && word.length >= 2 && (lbl.includes(word) || word.includes(lbl));
     };
     let matched = [];
     if (attrWords.length > 0) {
-      matched = facts.filter(f => attrWords.some(w => labelHit(f, w)));
+      const labelWords = [];
+      for (const w of attrWords) {
+        labelWords.push(w);
+        (ATTR_SYNONYMS[w] || []).forEach(s => labelWords.push(s));
+      }
+      matched = facts.filter(f => labelWords.some(w => labelHit(f, w)));
+      const valMatched = facts.filter(f => {
+        const lbl = (f.label || '').trim();
+        if (!GENERIC_LABEL_RE.test(lbl)) return false;
+        const val = f.value || '';
+        return attrWords.some(w => val.includes(w) || (ATTR_SYNONYMS[w] || []).some(s => val.includes(s)));
+      });
+      for (const f of valMatched) if (!matched.includes(f)) matched.push(f);
     }
     if (matched.length === 0 && claimText) {
       matched = facts.filter(f => {
@@ -132,8 +147,18 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
 
     const best = matched[0];
     // 部分命中提示：问了"身高 体重"但库里只有体重 → 明确告知身高缺失，
-    // 避免用户疑惑"为什么答案里没有身高"
-    const missingAttrs = attrWords.filter(w => !matched.some(f => labelHit(f, w)));
+    // 避免用户疑惑"为什么答案里没有身高"。
+    // 判定与上面的匹配口径一致（含近义词），否则"身高"已由肩高事实命中却仍被报缺失。
+    const attrSatisfied = (w) => matched.some(f => {
+      const lbl = (f.label || '').trim();
+      const val = f.value || '';
+      if (labelHit(f, w)) return true;
+      if ((ATTR_SYNONYMS[w] || []).some(s => labelHit(f, s))) return true;
+      if (GENERIC_LABEL_RE.test(lbl) &&
+          (val.includes(w) || (ATTR_SYNONYMS[w] || []).some(s => val.includes(s)))) return true;
+      return false;
+    });
+    const missingAttrs = attrWords.filter(w => !attrSatisfied(w));
     return {
       results: [...kbSources, ...extra],
       info: {
@@ -184,10 +209,10 @@ function buildSearchQuery(claim) {
 
   if (entity) {
     // metric 无数字 → 是属性名，拼上；有数字 → 去掉数字后若还剩属性词则拼上
-    if (metric && !/\d/.test(metric)) return `${entity} ${metric}`;
+    if (metric && !/\d/.test(metric)) return expandQueryWithAttrSynonyms(`${entity} ${metric}`, metric);
     const metricWord = stripNumbers(metric);
     if (metricWord && metricWord.length >= 2 && metricWord !== entity) {
-      return `${entity} ${metricWord}`;
+      return expandQueryWithAttrSynonyms(`${entity} ${metricWord}`, metricWord);
     }
     return entity;
   }
@@ -198,6 +223,35 @@ function buildSearchQuery(claim) {
 // 属性维度词：断言中出现这些词时，检索词带上维度（如"大熊猫 体重"），
 // 并作为 hint 传给维基深度抽取，定向定位正文数据句
 const ATTR_RE = /(体重|體重|身高|体长|體長|身长|身長|寿命|壽命|年龄|年齡|速度|面积|面積|人口|产量|產量|距离|距離|海拔|重量|翼展|跨度|直径|直徑|厚度|深度|宽度|寬度|长度|長度|生日|诞辰|出生|生於|生于|出生日期|出生年月|逝世|去世|卒於|卒于|国籍|籍贯|学历|职业|职务|职位|身高|体重)/;
+
+// 属性近义表（三处口径统一：检索词扩展 / KB 事实匹配 / 数据卡过滤）
+// 为什么需要它：搜索引擎不懂"身高"对动物等于"肩高/体长"。实测"大熊猫 身高"只会召回
+// 泛泛的科普页，而"大熊猫 身高 肩高 体长"能直接召回《大熊猫的外形特征》（含"肩高650—750毫米"）。
+// 注意从严：体重**不认**"重量"——库里存在"粪便重量"这类脏标签，宽松近义会造成假阳性。
+const ATTR_SYNONYMS = {
+  '身高': ['肩高', '臀高', '体长', '身长', '体高', '头躯长'],
+  '体长': ['身长', '肩高', '身高'],
+  '体重': [],
+  '重量': ['体重'],
+  '面积': ['占地', '总面积', '幅员'],
+  '人口': ['总人口', '人口数'],
+  '寿命': ['平均寿命', '最长寿命'],
+  '速度': ['时速'],
+  '海拔': [],
+  '翼展': ['展翅长'],
+};
+
+// 通用标签：标签不成词（如"相关数据"）的事实，允许按"值"匹配属性词
+const GENERIC_LABEL_RE = /^(相关数据|其他|数据|详情|信息|备注)?$/;
+
+/** 把属性近义词追加进检索词（最多 2 个，避免过长影响召回） */
+function expandQueryWithAttrSynonyms(query, metric) {
+  const q = String(query || '').trim();
+  const m = String(metric || '').trim();
+  if (!q || !m) return q;
+  const syn = (ATTR_SYNONYMS[m] || []).filter(s => !q.includes(s)).slice(0, 2);
+  return syn.length ? `${q} ${syn.join(' ')}` : q;
+}
 
 export async function handleCheck(request, env) {
   let body;
@@ -386,7 +440,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
   let entity = (llmParse && llmParse.entity) || text.replace(/[的了是在有？?多少几什么]/g, '').trim();
   let hint = (llmParse && llmParse.hint) || '';
-  const searchQuery = (llmParse && llmParse.searchQuery) || (entity ? (hint ? `${entity} ${hint}` : entity) : text.trim());
+  // 检索词扩展：属性词带上近义词，否则搜索引擎召回不到真正的数据页
+  //（实测"大熊猫 身高"召回不到《大熊猫的外形特征》，"大熊猫 身高 肩高 体长"则第一页就有）
+  let searchQuery = (llmParse && llmParse.searchQuery) || (entity ? (hint ? `${entity} ${hint}` : entity) : text.trim());
+  if (hint) searchQuery = expandQueryWithAttrSynonyms(searchQuery, hint);
 
   // 外国实体检测：查询含外国国名时追加英文 Tavily 检索（外国数据在英文权威源最全）
   // 这是通用逻辑，不限于 GDP——任何含外国国名的查询都走英文增强
@@ -472,16 +529,54 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     }
   }
 
+  const tStart = Date.now();
+  let tSearchDone = 0;
+  let tLlmDone = 0;
   let searchResults = null;
+  // 官方站检索（Tavily site:gov.cn）与主检索**并行**发起：两者互不依赖，
+  // 串行会让总耗时叠加 ~5s（实测冷查询 16-18s → 并行后明显下降）。
+  // 官方结果照旧不缓存（避免限流空结果被固化），在主检索之后再合并。
+  const govPromise = (intent === 'query')
+    ? searchGovDirect(entity || searchQuery, { apiKey: env.TAVILY_KEY }).catch(() => [])
+    : Promise.resolve([]);
   try {
     const cacheK = searchCacheKey(searchQuery + '|card');
     const cached = await cacheGet(env.FACT_CACHE, cacheK);
     if (cached) {
       searchResults = cached;
     } else {
-      const raw = await braveSearch({ query: searchQuery, preferOfficial: true, topK: 5, whitelist, hint, tavilyApiKey: env.TAVILY_KEY });
+      // 属性查询：与主检索**并行**发起一轮 Tavily 补齐检索（basic 深度，快）。
+      // 搜索引擎摘要常缺属性数据（实测"金丝猴 体重"7 条结果无一含体重），
+      // 这轮负责把真正的数据段落捞回来；并行发起避免把耗时叠加成串行。
+      const attrQuery = hint ? expandQueryWithAttrSynonyms(`${entity || ''} ${hint}`.trim(), hint) : '';
+      const [raw, attrExtra] = await Promise.all([
+        braveSearch({ query: searchQuery, preferOfficial: true, topK: 8, whitelist, hint, tavilyApiKey: env.TAVILY_KEY }),
+        (attrQuery && env.TAVILY_KEY)
+          ? tavilySearch(attrQuery, { apiKey: env.TAVILY_KEY, topK: 6, searchDepth: 'basic' })
+              .catch(() => ({ results: [], answer: '' }))
+          : Promise.resolve(null),
+      ]);
       searchResults = annotateResults(raw, env);
-      // 如果 Wikipedia/DDG/SearXNG 返回的结果全被过滤或为空，用 Tavily 兜底
+      if (attrExtra) {
+        const seen = new Set((searchResults || []).map(r => r.url));
+        const fresh = (attrExtra.results || []).filter(r => r.url && !seen.has(r.url));
+        if (fresh.length) {
+          searchResults = [...searchResults, ...annotateResults(fresh, env)];
+          searchQuery = attrQuery; // 诚实记录实际使用了扩展检索词
+        }
+        // Tavily 综合答案：多来源结论压缩成一段，作为首条证据
+        if (attrExtra.answer) {
+          searchResults = [{
+            title: '检索引擎综合答案',
+            url: 'https://app.tavily.com/',
+            snippet: attrExtra.answer,
+            source: 'tavily',
+            official_tag: false,
+            official_score: 0.5,
+          }, ...searchResults];
+        }
+      }
+      // 如果 Wikipedia/Bing/Tavily 返回的结果全被过滤或为空，用 Tavily 兜底
       if (!searchResults || searchResults.length === 0) {
         try {
           // Tavily 中文支持差，自动转英文查询
@@ -500,10 +595,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     searchResults = [];
   }
 
-  // 查询模式额外实时检索官方站（GDP/政策等权威数据在官方公报，维基常无；不缓存以免限流空结果固化）
+  // 查询模式合并官方站结果（与主检索并行取回，这里只等结果）
   if (intent === 'query') {
     try {
-      const govRaw = await searchGovDirect(entity || searchQuery, { apiKey: env.TAVILY_KEY });
+      const govRaw = await govPromise;
       const govAnnotated = annotateResults(govRaw, env);
       // 官方真实结果优先排前（最多 3 条）——govDirect 走 Tavily site:gov.cn，
       // 召回噪音多（"机器人大会"正文提一嘴大熊猫也会进），全部置顶会把
@@ -514,6 +609,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       const relEntity = entityTermOf(entity && entity.length >= 2 ? entity : text.trim());
       searchResults = filterRelevant(searchResults, relEntity);
     } catch { /* 官方检索失败不影响维基结果 */ }
+    tSearchDone = Date.now();
   }
 
   // 外国实体英文 Tavily 检索：外国数据在英文权威站（BEA/IMF/世行/statista/tradingeconomics等）最全
@@ -555,15 +651,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
     // 带属性词的查询：把数据卡过滤到只留与属性相关的数据句。
     // 否则问"大熊猫 身高"，卡片里塞满脑容量/排便等无关句——观感即"答非所问"，
-    // 且用户点手动入库会把无关句存进词条。近义词表从严维护，
-    // 防假阳性（如"粪便重量约100克"混进体重查询）。
+    // 且用户点手动入库会把无关句存进词条。
+    // 近义表统一用模块级 ATTR_SYNONYMS（与检索扩展、KB 匹配同一份，避免三处口径漂移）。
     if (hint) {
-      const ATTR_SYNONYMS = {
-        '身高': ['体长', '身长', '肩高', '体高', '头躯长'],
-        '体长': ['身高', '身长', '肩高'],
-        '人口': ['总人口', '人口数'],
-        '面积': ['占地', '总面积', '幅员'],
-      };
       const keys = [hint, ...(ATTR_SYNONYMS[hint] || [])];
       const rel = (s) => keys.some(k => String(s || '').includes(k));
       factCard.facts = factCard.facts.filter(f => rel(f.property) || rel(f.value));
@@ -619,6 +709,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           temperature: 0.2,
           maxTokens: 600,
         });
+        tLlmDone = Date.now();
         if (llmResp && !Array.isArray(llmResp) && llmResp.answer) {
           answer = String(llmResp.answer);
           confidence = ['高', '中', '低'].includes(llmResp.confidence) ? llmResp.confidence : '中';
@@ -722,6 +813,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       ratings: [],
       draftCard: queryDraftCard,
       autoStored: queryAutoStored,
+      // 耗时拆解（诊断用）：检索 vs LLM 各占多少，避免再靠猜
+      timing: {
+        search_ms: tSearchDone ? (tSearchDone - tStart) : null,
+        llm_ms: tLlmDone ? (tLlmDone - tSearchDone) : null,
+        total_ms: Date.now() - tStart,
+      },
     };
   }
 

@@ -451,8 +451,10 @@ export async function searchEntries(kv, keyword, limit = 20) {
 
 /**
  * 删除词条（主键 + 别名 + 分类索引 + 待审标记 + 缓存）
+ * 会写一条删除审计（kbaudit:del:*，存 FACT_CACHE）——历史上出现过词条无声消失，
+ * 加审计后至少能查到"什么时候、删了哪个词条"。
  */
-export async function deleteEntry(kv, slug) {
+export async function deleteEntry(kv, slug, auditKv = null, actor = '') {
   // 读取卡片获取别名和分类
   const raw = await kv.get(entryKey(slug));
   if (raw) {
@@ -497,7 +499,53 @@ export async function deleteEntry(kv, slug) {
   // 清空所有 KB 查询缓存——用户查询时的缓存 key 基于输入原文哈希，
   // 无法逐个精确删除，直接清全部 kbcache: 最安全
   await clearKBCache(kv);
+  // 删除审计（写到 FACT_CACHE，与 KB 不同命名空间，KB 被清也留痕）
+  if (auditKv) {
+    try {
+      const ts = new Date().toISOString();
+      let title = '';
+      try { title = JSON.parse(raw || '{}').title || ''; } catch {}
+      await auditKv.put(`kbaudit:del:${ts}:${slug}`,
+        JSON.stringify({ slug, title, actor, at: ts }),
+        { expirationTtl: 90 * 24 * 60 * 60 });
+    } catch {}
+  }
   return { deleted: slug };
+}
+
+/**
+ * 全量备份知识库：把所有 kb:<slug> 词条快照写入 FACT_CACHE（不同命名空间，
+ * 即使 KB 被清空备份也还在）。每天由定时任务调用，也可用 admin action=backup 手动跑。
+ * @returns {{count:number, key:string, at:string}}
+ */
+export async function backupKB(kv, backupKv) {
+  const at = new Date().toISOString();
+  const day = at.slice(0, 10);
+  const list = await kv.list({ prefix: 'kb:', limit: 1000 });
+  const keys = list.keys || list || [];
+  const items = [];
+  for (const item of keys) {
+    const n = item.name;
+    if (n.startsWith('kb:alias:') || n.startsWith('kb:idx:') || n.startsWith('kb:pending') ||
+        n.startsWith('kb:hist:') || n.startsWith('kbcache:')) continue;
+    try {
+      const raw = await kv.get(n);
+      if (!raw) continue;
+      items.push({ key: n, card: JSON.parse(raw) });
+    } catch {}
+  }
+  let stored = 0;
+  if (backupKv) {
+    try {
+      await backupKv.put(`kbbackup:${day}`, JSON.stringify({ at, count: items.length, items }),
+        { expirationTtl: 30 * 24 * 60 * 60 });
+      // 再维护一个"最新备份"指针，避免跨天日期找不着
+      await backupKv.put('kbbackup:latest', JSON.stringify({ at, day, count: items.length, items }),
+        { expirationTtl: 30 * 24 * 60 * 60 });
+      stored = items.length;
+    } catch {}
+  }
+  return { count: items.length, stored, key: `kbbackup:${day}`, at };
 }
 
 /**

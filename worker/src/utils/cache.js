@@ -13,6 +13,9 @@ const RATING_TTL = 3 * 24 * 60 * 60;
 // 断言提取（LLM 拆句）缓存 1 天：同一段文本重复提交时跳过提取调用。
 // 与检索缓存同周期——证据刷新后评级输入会变，提取结果本身不依赖证据。
 const CLAIMS_TTL = 24 * 60 * 60;
+// 知识库事实挑选（LLM 从词条事实里挑序号）缓存 3 天。
+// key 里带了事实指纹，词条一变 key 就变，不存在"旧结果配新事实"的问题。
+const KB_SEL_TTL = 3 * 24 * 60 * 60;
 
 /**
  * 生成检索缓存 key
@@ -50,6 +53,14 @@ export function ratingCacheKey(claim, evidence) {
  */
 export function claimsCacheKey(text, context) {
   return 'clm:' + simpleHash((text || '') + '|' + (context || ''));
+}
+
+/**
+ * 生成"知识库事实挑选"缓存 key（问题 + 事实指纹）
+ * factsSig 由词条事实的 label/value 拼出，词条一变 key 就变。
+ */
+export function kbSelectCacheKey(question, factsSig) {
+  return 'kbSel:' + simpleHash((question || '') + '##' + (factsSig || ''));
 }
 
 /**
@@ -96,7 +107,7 @@ export async function cacheDelete(kv, key) {
 // 不能无前缀 list 全删：FACT_CACHE 里还存着 kbbackup:（知识库每日备份）
 // 与 kbaudit:del:（删除审计）——它们是数据不是缓存，被"清缓存"顺带删掉
 // 等于把保险和证据一起销毁（本地 KB 曾无声丢词条，这两样是唯一的兜底）。
-const CACHE_PREFIXES = ['q:', 'anc:', 'rate:', 'clm:'];
+const CACHE_PREFIXES = ['q:', 'anc:', 'rate:', 'clm:', 'kbSel:'];
 
 /**
  * 清除所有缓存（仅 CACHE_PREFIXES 命中的条目，备份与审计不动）
@@ -158,4 +169,4 @@ function simpleHash(str) {
   return Math.abs(h).toString(36);
 }
 
-export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL, SEARCH_TTL, RATING_TTL, CLAIMS_TTL };
+export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL, SEARCH_TTL, RATING_TTL, CLAIMS_TTL, KB_SEL_TTL };

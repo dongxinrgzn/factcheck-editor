@@ -1,6 +1,7 @@
 // FACT_KB 知识库读写 + 别名/分类索引
 
 import { cacheGet, cacheSet, cacheDelete, kbCacheKey, KB_CACHE_TTL, clearKBCache } from './cache.js';
+import { isDuplicateFact, classifyProp, splitMultiAttrClauses, makeDataRe, isCitableSource } from './attrClassify.js';
 
 /**
  * 生成词条主键
@@ -240,16 +241,29 @@ export async function mergeEntry(kv, slug, card, curator = 'auto_audit') {
   const old = await getEntry(kv, slug);
   if (!old) return { ok: false, added: 0, skipped: 0, reason: '词条不存在' };
 
-  // facts 去重键：优先 value（断言内容），其次 label+value
+  // facts 去重：① 同 label+value ② **同 value（忽略 label）** ③ 同属性 + 同测量值
+  // ② 不可省：同一句话换个属性标签再入库（实测"体长"数据先被贴成"体重"、之后又贴成
+  //    "体长"）能绕过 ①，词条里就留下内容重复的两条事实。
+  // ③ 覆盖"同义不同写法"：体长1.2-1.8米 与 体长一般在1200—1800毫米 其实是同一事实，
+  //    纯文本比对判不出来，换算到基准单位后指纹相同。
+  const normVal = (v) => String(v || '').replace(/\s+/g, '').trim();
   const factKeyOf = (f) => `${(f.label || '').trim()}||${(f.value || '').trim()}`;
   const existingKeys = new Set((old.facts || []).map(factKeyOf));
+  const existingVals = new Set((old.facts || []).map(f => normVal(f.value)).filter(Boolean));
   const mergedFacts = [...(old.facts || [])];
   let added = 0;
   let skipped = 0;
   for (const f of card.facts || []) {
+    if (!f.value) { skipped++; continue; }
     const k = factKeyOf(f);
-    if (!f.value || existingKeys.has(k)) { skipped++; continue; }
+    const nv = normVal(f.value);
+    if (existingKeys.has(k) || (nv && existingVals.has(nv)) ||
+        mergedFacts.some(x => isDuplicateFact(x, f))) {
+      skipped++;
+      continue;
+    }
     existingKeys.add(k);
+    if (nv) existingVals.add(nv);
     // key 重编号，避免与已有 fact_N 冲突
     mergedFacts.push({ ...f, key: `fact_${mergedFacts.length}` });
     added++;
@@ -277,6 +291,63 @@ export async function mergeEntry(kv, slug, card, curator = 'auto_audit') {
   };
   await approveEntry(kv, slug, mergedCard, curator);
   return { ok: true, added, skipped };
+}
+
+/**
+ * 归一化词条事实（维护用）：拆多属性长句 → 按子句重贴属性标签 → 去重。
+ *
+ * 修复的是这类历史脏数据：早期入库把 label 一律贴成"查询属性词"，于是
+ *   ① "体长"数据被贴成"体重" → 之后查"体长"命中不了；
+ *   ② 一句含七八个属性的长句整句存成一条 → 其它属性全被埋掉；
+ *   ③ 同一事实换个标签又存一遍 → 词条里出现两条重复。
+ *
+ * 只做"重新归类 + 去重 + 剔除无真实出处的事实"，**不新增、不改写任何数值内容**
+ * （value 要么整句、要么是它的子句）。归类/判重逻辑与检索侧共用 attrClassify，不会各自漂移。
+ *
+ * @returns {{facts:Array, before:number, after:number, split:number, dedup:number, relabel:number, dropped:number}}
+ */
+export function normalizeCardFacts(card) {
+  const facts = Array.isArray(card?.facts) ? card.facts : [];
+  const dataRe = makeDataRe(false);
+  const out = [];
+  let split = 0, dedup = 0, relabel = 0, dropped = 0;
+  const isBetter = (a, b) => {
+    const oa = !!(a?.source?.official_tag) || !!a?.source?.official;
+    const ob = !!(b?.source?.official_tag) || !!b?.source?.official;
+    if (oa !== ob) return oa;
+    // 同为官方/非官方时，有 URL 的更完整
+    return !a?.source?.url && !!b?.source?.url;
+  };
+  for (const f of facts) {
+    const value = String(f.value || '').trim();
+    if (!value) { dropped++; continue; }
+    // 无真实出处的（如检索引擎综合答案，url 指向聚合器）不进知识库
+    if (!isCitableSource(f.source)) { dropped++; continue; }
+    const clauses = splitMultiAttrClauses(value, dataRe);
+    if (clauses.length > 1) split++;
+    for (const clause of clauses) {
+      const oldLabel = String(f.label || '').trim();
+      const prop = classifyProp(clause) || oldLabel || '相关数据';
+      if (prop !== oldLabel) relabel++;
+      const nf = { ...f, label: prop, value: clause };
+      const nv = clause.replace(/\s+/g, '');
+      const idx = out.findIndex(x =>
+        String(x.value || '').replace(/\s+/g, '') === nv || isDuplicateFact(x, nf));
+      if (idx >= 0) {
+        dedup++;
+        // 重复项里保留来源更权威的那条（政府站优先于维基/聚合摘要）
+        if (isBetter(nf, out[idx])) out[idx] = nf;
+        continue;
+      }
+      out.push(nf);
+    }
+  }
+  return {
+    facts: out.map((f, i) => ({ ...f, key: `fact_${i}` })),
+    before: facts.length,
+    after: out.length,
+    split, dedup, relabel, dropped,
+  };
 }
 
 /**

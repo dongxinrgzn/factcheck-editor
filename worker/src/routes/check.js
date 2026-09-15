@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, cacheDelete, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL } from '../utils/cache.js';
+import { cacheGet, cacheSet, cacheDelete, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL, kbSelectCacheKey, KB_SEL_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -11,6 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { autoAudit, approveEntry, mergeEntry, slugify, queryEntry } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -49,6 +50,78 @@ async function mapLimit(items, limit, fn) {
  *
  * @returns {Promise<{results:Array, info:Object}|null>}
  */
+/**
+ * 让大模型从词条**已有事实**里挑出能回答问题的条目。
+ *
+ * ⚠️ 硬规则（用户明确要求：知识库里没有的数据绝对不能编造）：
+ *   大模型**只输出事实序号**，答案文本一律由调用方用词条存着的原文拼装。
+ *   它没有"写答案"的通道，想编也无从编起。挑不出任何一条就返回 []，
+ *   上层如实告知"知识库暂无此数据"并转全网检索，绝不拿模型生成的内容充数。
+ *
+ * 为什么要有这一层：标签匹配是确定性的，但标签一旦不准就会漏——多指标长句只按
+ * 第一个指标归类、近义属性词覆盖不全等。用户实测：词条里明明有"体长"数据，
+ * 查"大熊猫 体长"却命中不了，于是又跑一遍全网检索、把同一批数据重复入库。
+ *
+ * @returns {Promise<Array>} 挑中的事实对象数组（引用原数组元素），挑不中返回 []
+ */
+async function selectKBFactsByLLM(env, apiKey, question, facts) {
+  if (!apiKey || !Array.isArray(facts) || facts.length === 0) return [];
+  const list = facts.slice(0, 30); // 事实都很短，限 30 条防 prompt 膨胀
+  const factsSig = list.map(f => `${f.label || ''}:${f.value || ''}`).join('|');
+
+  // 缓存：同问题 + 同事实指纹 → 同结果（词条一变指纹就变）。
+  // 存成对象 {picks} 而非裸数组：cacheSet 会拒绝空数组，而这里"挑不中"也是
+  // 确定性结论（输入完全给定、无上游抖动），必须缓存，否则同一问题每次都白跑一次 LLM。
+  const ck = kbSelectCacheKey(question, factsSig);
+  try {
+    const cached = await cacheGet(env.FACT_CACHE, ck);
+    if (cached && Array.isArray(cached.picks)) return cached.picks.map(i => list[i - 1]).filter(Boolean);
+  } catch {}
+
+  let picks = [];
+  try {
+    const resp = await callLLMJson({
+      messages: [
+        {
+          role: 'system',
+          content: [
+            '你在做"从已有资料中检索"，不是问答，也不是写作。',
+            '下面给出某个词条的若干条事实，编号从 1 开始。',
+            '请挑出**能直接回答用户问题**的事实编号。',
+            '铁律：',
+            '1. 只能从给定编号里挑，不得改写、补充、推断、换算、合并任何内容；',
+            '2. 事实里没有用户问的那个指标（例如问"身高"而资料里只有"体重"）→ 返回空数组，',
+            '   不得用相近指标凑数（动物身高≈肩高/体长 这类近义**可以**算同一指标）；',
+            '3. 年份、地区必须与问题一致；',
+            '4. 只输出 JSON：{"picks":[1,3]}；一个都不合适就 {"picks":[]}',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `用户问题：${question}\n\n事实列表：\n` +
+            list.map((f, i) => `${i + 1}. [${f.label || '未标注'}] ${f.value || ''}`).join('\n'),
+        },
+      ],
+      apiKey,
+      temperature: 0,
+      maxTokens: 120,
+    });
+    const raw = Array.isArray(resp?.picks) ? resp.picks : [];
+    // 严格校验：必须是 1..list.length 的整数，去重、保序、限 6 条
+    const seen = new Set();
+    for (const n of raw) {
+      const i = Number(n);
+      if (!Number.isInteger(i) || i < 1 || i > list.length || seen.has(i)) continue;
+      seen.add(i);
+      picks.push(i);
+      if (picks.length >= 6) break;
+    }
+  } catch { picks = []; }
+
+  try { await cacheSet(env.FACT_CACHE, ck, { picks }, KB_SEL_TTL); } catch {}
+  return picks.map(i => list[i - 1]).filter(Boolean);
+}
+
 export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
   if (!env.FACT_KB) return null;
   const probes = [];
@@ -120,6 +193,16 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     if (matched.length === 0 && nums.length > 0) {
       matched = facts.filter(f => nums.some(n => (f.value || '').includes(n)));
     }
+    // 阶段 2（大模型挑选）：标签/数值都没匹配上，但**词条确实存在** → 让模型从
+    // 词条已有事实里挑序号（见 selectKBFactsByLLM 的硬规则）。仅在有属性词时启用：
+    // 纯实体查询走 allowLoose 取首条即可，不必为此多付一次 LLM。
+    let matchedViaLLM = false;
+    if (matched.length === 0 && metric) {
+      try {
+        const picked = await selectKBFactsByLLM(env, opts.apiKey, claimText || `${entity} ${metric}`.trim(), facts);
+        if (picked.length > 0) { matched = picked; matchedViaLLM = true; }
+      } catch { /* 挑选失败按未命中处理 */ }
+    }
     if (matched.length === 0) {
       if (!allowLoose) continue;
       matched = [facts[0]];
@@ -158,7 +241,9 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
           (val.includes(w) || (ATTR_SYNONYMS[w] || []).some(s => val.includes(s)))) return true;
       return false;
     });
-    const missingAttrs = attrWords.filter(w => !attrSatisfied(w));
+    // 大模型挑选出来的事实，就是"能回答该属性"的结论，不再按标签口径重判缺失
+    // （否则"体长"数据因标签是"体重"会被误报为缺失）。
+    const missingAttrs = matchedViaLLM ? [] : attrWords.filter(w => !attrSatisfied(w));
     return {
       results: [...kbSources, ...extra],
       info: {
@@ -175,6 +260,8 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
         missingAttrs,
         updatedAt: card.updated_at || '',
         factCount: facts.length,
+        // 诊断用：命中是靠标签匹配还是大模型挑选
+        matchedVia: matchedViaLLM ? 'llm' : 'label',
       },
     };
   }
@@ -226,11 +313,14 @@ const ATTR_RE = /(体重|體重|身高|体长|體長|身长|身長|寿命|壽命
 
 // 属性近义表（三处口径统一：检索词扩展 / KB 事实匹配 / 数据卡过滤）
 // 为什么需要它：搜索引擎不懂"身高"对动物等于"肩高/体长"。实测"大熊猫 身高"只会召回
-// 泛泛的科普页，而"大熊猫 身高 肩高 体长"能直接召回《大熊猫的外形特征》（含"肩高650—750毫米"）。
-// 注意从严：体重**不认**"重量"——库里存在"粪便重量"这类脏标签，宽松近义会造成假阳性。
+// 泛泛的科普页，而"大熊猫 身高 肩高"能直接召回《大熊猫的外形特征》（含"肩高650—750毫米"）。
+// 从严维护，只收**语义上确实同一属性**的词——宁可让大模型挑选那一层去兜底，
+// 也不要让"查体长却返回肩高"这种答非所问：
+//   · 体重不认"重量"（库里存在"粪便重量"这类脏标签，宽松近义会假阳性）
+//   · 体长不认"肩高/身高"（体长≠肩高，是两种量度）
 const ATTR_SYNONYMS = {
-  '身高': ['肩高', '臀高', '体长', '身长', '体高', '头躯长'],
-  '体长': ['身长', '肩高', '身高'],
+  '身高': ['肩高', '臀高', '体高'],   // 动物的"身高"即肩高/臀高
+  '体长': ['身长', '头躯长'],
   '体重': [],
   '重量': ['体重'],
   '面积': ['占地', '总面积', '幅员'],
@@ -307,39 +397,9 @@ function ratingEn(r) {
 }
 
 // 数据句单位：货币/百分比（经济）+ 度量衡（自然）
-const CN_UNIT = '(?:万亿元|亿万元|亿元|万元|亿美元|万美元|亿港元|万港元|万亿美元|千亿元|百亿元|亿元|万亿|千亿|百亿|亿元|美元|港元|欧元|日元|人民币|元|%|％|个百分点|百分点|公斤|千克|吨|克|厘米|千米|公里|毫米|公尺|米|平方公里|平方米|公顷|公頃|升|毫升|摄氏度|攝氏度|万人|亿人|萬人|萬隻|万只|万头|牛顿|歲|岁)';
-const EN_UNIT = '(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km/h|mph|years?|yrs?|hectares?|percent|%)';
+// 属性识别/拆句/测量值指纹统一走 attrClassify（检索侧与入库侧共用同一份口径）
 const DATA_CN_RE = new RegExp('[^。；;\\n]*\\d[\\d.,，\\-－—~～]*\\s*' + CN_UNIT + '[^。；;\\n]*[。；;\\n]', 'g');
 const DATA_EN_RE = new RegExp('[^.\\n]*\\d[\\d.,\\-–—~]*\\s*(?:' + EN_UNIT + ')\\b[^.\\n]*[.\\n]', 'gi');
-
-// 指标关键词 → 属性名（经济类在前，命中即归类）
-const INDICATORS = [
-  ['国内生产总值', '国内生产总值'], ['生产总值', '国内生产总值'], ['GDP', '国内生产总值'], ['gdp', '国内生产总值'],
-  ['居民消费价格', '居民消费价格指数(CPI)'], ['CPI', '居民消费价格指数(CPI)'], ['cpi', '居民消费价格指数(CPI)'],
-  ['人均可支配收入', '人均可支配收入'], ['财政收入', '财政收入'], ['税收收入', '税收收入'],
-  ['粮食产量', '粮食产量'], ['总产量', '产量'], ['产量', '产量'],
-  ['城镇化率', '城镇化率'], ['失业率', '失业率'], ['出生率', '出生率'], ['人口', '人口'],
-  ['同比增长', '增长率'], ['比上年增长', '增长率'], ['增长', '增长率'], ['增速', '增长率'], ['增长率', '增长率'],
-  ['人均', '人均值'], ['收入', '收入'],
-  ['体重', '体重'], ['體重', '体重'], ['体长', '体长'], ['體長', '体长'], ['身高', '身高'],
-  ['寿命', '寿命'], ['壽命', '寿命'], ['海拔', '海拔'], ['面积', '面积'], ['面積', '面积'],
-  ['速度', '速度'], ['咬合力', '咬合力'], ['翼展', '翼展'], ['重量', '重量'],
-  // 英文指标词
-  ['weigh', '体重'], ['weight', '体重'], ['body mass', '体重'],
-  ['body length', '体长'], ['length', '体长'], ['long', '体长'],
-  ['lifespan', '寿命'], ['life span', '寿命'], ['years old', '寿命'], ['old', '寿命'],
-  ['speed', '速度'], ['km/h', '速度'],
-  ['elevation', '海拔'], ['altitude', '海拔'], ['above sea', '海拔'],
-  ['bite force', '咬合力'], ['wingspan', '翼展'],
-  ['population', '种群数量'], ['inhabitants', '种群数量'],
-];
-
-function classifyProp(sentence) {
-  for (const [kw, prop] of INDICATORS) {
-    if (sentence.includes(kw)) return prop;
-  }
-  return null;
-}
 
 /**
  * 把检索结果（维基 + 官方站）中的数据句解析成百科卡片（属性→数值→来源）
@@ -384,18 +444,21 @@ function buildFactCard(results, entity, queryText = '') {
       sentences = snip.split(/[。；;\n]+/g).map(s => s.trim()).filter(Boolean);
     }
 
+    // 数据判据（数字+单位）：中文按 CN_UNIT，英文按计量单位词
+    const dataRe = makeDataRe(isEn);
     for (let s0 of sentences) {
       const s = s0.replace(/\s+/g, ' ').trim();
       if (s.length < 8 || s.length > 160) continue;
       // 跳过网页页脚/备案/导航噪音，以及纯标题（无句读且过短的导航词）
       if (/版权所有|ICP备|公网安备|网站标识码|中文域名|京公网|备案|Copyright|cookie|隐私权|网站地图|首页|上一篇|下一篇|点击下载|字体大小|分享到/.test(s)) continue;
-      const hasData = isEn ? /\d[\d.,\-–—~]*\s*(?:trillion|billion|million|thousand|yuan|dollars?|USD|RMB|kg|kgs|kilograms?|lbs?|pounds?|cm|mm|km|meters?|metres?|tons?|tonnes?|km\/h|mph|years?|yrs?|hectares?|percent|%)/i.test(s)
-        : new RegExp('\\d[\\d.,，\\-－—~～至到]*\\s*' + CN_UNIT).test(s);
-      if (!hasData) continue;
-      const prop = classifyProp(s) || '相关数据';
-      // 含目标年份的句子加权排前
-      const yearHit = wantYear && s.includes(wantYear);
-      facts.push({ property: prop, value: s, source, yearHit, official: source.official });
+      if (!dataRe.test(s)) continue;
+      // 多指标长句 → 拆成单指标子句，避免其它指标的数据被整句的归类埋掉（详见 splitMultiAttrClauses）
+      for (const clause of splitMultiAttrClauses(s, dataRe)) {
+        const prop = classifyProp(clause) || '相关数据';
+        // 含目标年份的句子加权排前
+        const yearHit = wantYear && clause.includes(wantYear);
+        facts.push({ property: prop, value: clause, source, yearHit, official: source.official });
+      }
     }
   }
 
@@ -485,7 +548,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     try {
       // loose 仅在无属性词（纯实体查询）时生效：词条存在即可取首条事实展示；
       // 带属性词的查询（如"大熊猫 身高"）必须匹配到对应事实，否则走全网检索。
-      wholeKbHit = await lookupKBForClaim(env, { claim: text, entity: entity || text }, entity, hint, { loose: true });
+      // apiKey 透传下去：标签没匹配上时让大模型从词条事实里挑（只挑序号，不生成内容）。
+      wholeKbHit = await lookupKBForClaim(env, { claim: text, entity: entity || text }, entity, hint, { loose: true, apiKey });
     } catch { wholeKbHit = null; }
 
     // KB 命中：直接以知识库内容作答——在此提前返回，
@@ -735,12 +799,22 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     let queryDraftCard = null;
     let queryAutoStored = false;
     // draftCard 事实来源：优先用 factCard 正则提取的 facts；若为空但 LLM 有高可信度答案，用 LLM 答案构建
-    // label 优先用属性词（hint）：入库后 KB 事实的 label 与属性词对应，
-    // 下次带属性查询（"大熊猫 身高"）才能被 lookupKBForClaim 精确匹配。
-    const draftLabel = () => hint || '';
+    // label 取事实**自身**的属性名（classifyProp 的规范名，如 体长/肩高/体重），
+    // 而不是一律贴查询属性词 hint——后者会把"体长"数据贴上"体重"标签，
+    // 之后查"体长"就命中不了知识库，只能重新检索再把同一批数据入库（用户实测：
+    // 大熊猫词条出现两条体长事实）。问"身高"时命中"肩高"事实由 ATTR_SYNONYMS 在查询侧兜住。
+    // fact 自身属性识别不出（'相关数据'）时才退回 hint / 实体名。
+    const draftLabelOf = (f) => {
+      const p = String((f && f.property) || '').trim();
+      if (p && p !== '相关数据') return p;
+      return hint || entity || text.trim();
+    };
+    // 入库前剔除"无真实出处"的事实：检索引擎综合答案（url 指向聚合器而非原页面）
+    // 只能当证据看，不能当知识库事实的来源——否则等于把一段模型生成的文字
+    // 当成"有出处的事实"存进库里。
     const draftFacts = factCard.facts.length > 0
-      ? factCard.facts.map(f => ({
-          label: draftLabel() || f.property || text.trim(),
+      ? factCard.facts.filter(f => isCitableSource(f.source)).map(f => ({
+          label: draftLabelOf(f),
           value: f.value || '',
           rating: 'high',
           source: {
@@ -754,7 +828,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }))
       : (answer && confidence === '高' && searchResults && searchResults.length > 0
         ? [{
-            label: draftLabel() || entity || text.trim(),
+            label: hint || entity || text.trim(),
             value: answer,
             rating: 'high',
             source: {

@@ -2,7 +2,7 @@
 
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
-import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify, backupKB } from '../utils/kbStore.js';
+import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify, backupKB, normalizeCardFacts } from '../utils/kbStore.js';
 import { clearAllCache, clearKBCache } from '../utils/cache.js';
 import { runCheck } from './check.js';
 
@@ -124,6 +124,36 @@ export async function handleKbSubmit(request, env) {
   if (action === 'backup') {
     const result = await backupKB(env.FACT_KB, env.FACT_CACHE);
     return jsonResponse({ ok: true, data: result }, 200, request);
+  }
+
+  // 归一化词条事实（维护用）：拆多属性长句、重贴属性标签、去重。
+  // 修复历史脏数据（label 一律贴查询词 → 属性错配 + 长句埋数据 + 重复入库）。
+  // 只重新归类/去重，不改写任何数值内容；approveEntry 会留存历史版本可回滚。
+  // 批量改动整个知识库，仅限管理员。
+  if (action === 'normalize_kb') {
+    if (!isAdmin) return errorJson('仅管理员可执行', 403, 'FORBIDDEN', request);
+    const onlySlug = body.slug || '';
+    const list = await env.FACT_KB.list({ prefix: 'kb:', limit: 1000 });
+    const keys = (list.keys || list || []).map(k => k.name).filter(n =>
+      !n.startsWith('kb:alias:') && !n.startsWith('kb:idx:') &&
+      !n.startsWith('kb:hist:') && !n.startsWith('kb:pending') && !n.startsWith('kbcache:'));
+    const report = [];
+    for (const n of keys) {
+      const slug = n.slice(3);
+      if (onlySlug && slug !== onlySlug) continue;
+      const card = await getEntry(env.FACT_KB, slug);
+      if (!card) continue;
+      const r = normalizeCardFacts(card);
+      const changed = r.after !== r.before || r.relabel > 0;
+      if (changed) {
+        await approveEntry(env.FACT_KB, slug, { ...card, facts: r.facts }, 'normalize');
+      }
+      report.push({ slug, title: card.title || '', changed,
+                    before: r.before, after: r.after, split: r.split, dedup: r.dedup,
+                    relabel: r.relabel, dropped: r.dropped });
+    }
+    await clearKBCache(env.FACT_KB);
+    return jsonResponse({ ok: true, data: { scanned: report.length, report } }, 200, request);
   }
 
   // 清除所有缓存

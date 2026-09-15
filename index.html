@@ -244,46 +244,20 @@ body {
   padding: 1px 6px;
   border-radius: 3px;
 }
-/* 右下角入库提示 toast */
-#toast-box {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  z-index: 9999;
-  max-width: 340px;
+/* 逐条入库状态（替代原来右下角的 toast 弹窗：用户反馈弹窗没有意义，
+   入库提示要跟着每一条结果走） */
+.store-status {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed #dfe6e9;
+  font-size: 12px;
 }
-.toast {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--muted);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-  padding: 10px 14px;
-  font-size: 13px;
-  color: var(--text);
-  animation: toastIn .22s ease-out;
-}
-.toast.toast-auto { border-left-color: var(--green); background: #f1f8f2; }
-.toast.toast-manual { border-left-color: var(--accent); background: #f1f6fd; }
-.toast.toast-info { border-left-color: #9aa0a6; }
-.toast .toast-title { font-weight: 600; margin-bottom: 2px; }
-.toast .toast-desc { color: var(--muted); font-size: 12px; word-break: break-all; }
-.toast .toast-actions { margin-top: 8px; display: flex; gap: 6px; }
-.toast .toast-actions button {
-  font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer;
-  border: 1px solid var(--border); background: #fff; color: var(--text);
-}
-.toast .toast-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.toast .toast-close { float: right; cursor: pointer; color: #aaa; font-size: 15px; line-height: 1; margin-left: 8px; }
-@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.store-status-auto { color: #2e7d32; }
+.store-status-skip { color: #1565c0; }
+.store-status-none { color: #9aa0a6; }
 </style>
 </head>
 <body>
-<!-- 右下角提示容器 -->
-<div id="toast-box"></div>
 
 <div class="topbar">
   <h1>事实查询</h1>
@@ -471,7 +445,6 @@ body {
         '<div style="font-size:12px;color:#555;margin-top:4px;">词条：' + escapeHtml(data.kbInfo.title || '') +
         '（' + escapeHtml(data.kbInfo.auditLabel || '已审核') + '，共 ' + escapeHtml(String(data.kbInfo.factCount || 0)) + ' 条事实' +
         (data.kbInfo.updatedAt ? '，更新于 ' + escapeHtml(data.kbInfo.updatedAt) : '') + '）</div></div>');
-      showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + (data.kbInfo.title || '') });
     } else if (kbCount > 0) {
       blocks.push('<div class="report-section" style="background:#eef7ee;border:1px solid #c8e6c9;border-radius:6px;padding:10px;margin-top:14px;">' +
         '<strong style="color:#2e7d32;">✓ 本次 ' + kbCount + ' 个事实点来自知识库</strong>' +
@@ -491,7 +464,6 @@ body {
         }).join('、');
         blocks.push('<div class="report-section" style="color:#2e7d32;border-top:2px dashed #c8e6c9;margin-top:14px;padding-top:10px;">' +
           '★ 已自动入知识库（自动审核）：' + storedText + '</div>');
-        showToast({ type: 'auto', title: '已自动入知识库（自动审核）', desc: '词条：' + storedList.map(function(s) { return s.title; }).join('、') });
 
         // 除自动入库外，仍有未达标的条目 → 补一个可手动入库的提示
         var leftover = data.partialSkipped || [];
@@ -510,19 +482,12 @@ body {
         var descExtra = (nHigh > 0)
           ? '（其中 ' + nHigh + ' 个事实点判为高可信）'
           : '';
-        showToast({
-          type: 'manual',
-          title: '可信度：' + confLabel + '，可选择是否入库',
-          desc: '词条：' + title + descExtra,
-          actions: [
-            { text: '入库', primary: true, onClick: function(el) { window._manualStore(function() { el.remove(); }); } },
-            { text: '不入库', onClick: function(el) { window._skipStore(); el.remove(); } }
-          ]
-        });
-        blocks.push('<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 可信度：' + escapeHtml(confLabel) +
+        // 不再弹右下角 toast（用户反馈：弹窗没意义，入库提示要跟着每条结果走）。
+        // 逐条状态由每条断言下方的 storeStatus 行呈现，这里只留一个汇总块。
+        blocks.push('<div id="store-choice-tip" class="report-section" style="color:#1565c0;border-top:2px dashed #bbdefb;margin-top:14px;padding-top:10px;">☆ 整体可信度：' + escapeHtml(confLabel) +
           descExtra + '。词条：' + escapeHtml(title) +
           ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
-          'onclick="window._manualStore()">入库</button>' +
+          'onclick="window._manualStore()">全部入库</button>' +
           ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
           'onclick="window._skipStore()">不入库</button></div>');
       }
@@ -643,7 +608,7 @@ body {
         var html2 = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
           '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
-          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
+          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '未检索到可引用证据，建议人工核实') + '</div>';
         if (r.correction) {
           html2 += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
         }
@@ -653,6 +618,7 @@ body {
               escapeHtml(s.title || '') + '] ↗</a>';
           }).join('');
         }
+        html2 += storeBadgeHtml(r);
         html2 += '</div>';
         return html2;
       }).join('');
@@ -666,8 +632,20 @@ body {
     if (data.matches) {
       html = '<div class="report-section"><strong>断句：</strong>' + escapeHtml(data.segment || '') + '</div>';
       if (data.suspected_err && data.suspected_err.length > 0) {
-        html += '<div class="correction-box"><strong>疑似讹字：</strong>' +
-          escapeHtml(JSON.stringify(data.suspected_err)) + '</div>';
+        // 结构化渲染，不再把原始 JSON 直接倒到界面上。
+        // 旧版显示 "疑似讹字：[{"疑似位置":"侯王","建议校正":"侯王的"}]"，
+        // 用户完全不知道这条信息是什么意思、跟自己要核实的内容有什么关系。
+        var errHtml = data.suspected_err.map(function(e) {
+          if (typeof e === 'string') return '<div style="margin:2px 0;">· ' + escapeHtml(e) + '</div>';
+          var pos = e['疑似位置'] || e.pos || e.position || '';
+          var fix = e['建议校正'] || e.fix || e.correction || '';
+          var why = e['理由'] || e.reason || e.note || '';
+          var one = pos ? ('位置「' + escapeHtml(String(pos)) + '」') : '';
+          if (fix && String(fix) !== String(pos)) one += (one ? '，' : '') + '建议校正为「' + escapeHtml(String(fix)) + '」';
+          if (why) one += (one ? ' ' : '') + '（' + escapeHtml(String(why)) + '）';
+          return '<div style="margin:2px 0;">· ' + (one || escapeHtml(JSON.stringify(e))) + '</div>';
+        }).join('');
+        html += '<div class="correction-box"><strong>疑似讹字（仅供参考）：</strong>' + errHtml + '</div>';
       }
       // 诗词库命中卡片（内置唐诗三百首/宋词三百首/诗经）
       if (data.poem) {
@@ -719,7 +697,7 @@ body {
         var item = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
           '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
-          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '（未检索到可引用证据）') + '</div>';
+          '<div style="margin-top:4px;"><strong>依据：</strong>' + escapeHtml(r.evidence || '未检索到可引用证据，建议人工核实') + '</div>';
         if (r.correction) {
           item += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
         }
@@ -729,6 +707,7 @@ body {
               escapeHtml(s.title || '') + '] ↗</a>';
           }).join('');
         }
+        item += storeBadgeHtml(r);
         item += '</div>';
         return item;
       }).join('');
@@ -765,59 +744,56 @@ body {
     });
   }
 
-  // ---- 右下角提示 toast ----
-  // opts: { type:'auto'|'manual'|'info', title, desc, ttl, actions:[{text,primary,onClick}] }
-  function showToast(opts) {
-    var box = $('toast-box');
-    if (!box) return null;
-    var el = document.createElement('div');
-    el.className = 'toast toast-' + (opts.type || 'info');
-    var html = '<span class="toast-close" title="关闭">×</span>';
-    if (opts.title) html += '<div class="toast-title">' + escapeHtml(opts.title) + '</div>';
-    if (opts.desc) html += '<div class="toast-desc">' + escapeHtml(opts.desc) + '</div>';
-    if (opts.actions && opts.actions.length) {
-      html += '<div class="toast-actions">';
-      opts.actions.forEach(function(a, i) {
-        html += '<button class="' + (a.primary ? 'primary' : '') + '" data-idx="' + i + '">' + escapeHtml(a.text) + '</button>';
-      });
-      html += '</div>';
-    }
-    el.innerHTML = html;
-    box.appendChild(el);
-    el.querySelector('.toast-close').onclick = function() { el.remove(); };
-    if (opts.actions && opts.actions.length) {
-      Array.prototype.forEach.call(el.querySelectorAll('.toast-actions button'), function(btn) {
-        btn.onclick = function() {
-          var a = opts.actions[parseInt(btn.getAttribute('data-idx'), 10)];
-          if (a && a.onClick) a.onClick(el); else el.remove();
-        };
-      });
-    }
-    // 无操作按钮的提示自动消失；带按钮的需用户处理（入库/不入库/关闭）
-    var ttl = opts.ttl != null ? opts.ttl : (opts.actions && opts.actions.length ? 0 : 6000);
-    if (ttl > 0) setTimeout(function() { if (el.parentNode) el.remove(); }, ttl);
-    return el;
-  }
+  // ---- 右下角 toast 已移除 ----
+  // 用户反馈：弹窗"没有意义"，入库提示必须跟着每一条结果走。
+  // 现在由每条断言下方的 storeBadgeHtml() 内联呈现，入库/放弃后就地更新
+  // （paintStoreStatus 批量刷新）。保留一个 no-op 以防旧引用报错。
+  function showToast() { return null; }
   window._showToast = showToast;
 
   // 粗判是否为古文/诗词类文本，决定查证模式走哪条链路
   // （与后端 verifyAncient 的 isPoem 保持一致的判据，避免前后端路由分叉）
+  //
+  // 2026-09-15 重构：旧实现把 `if (/《[^》]{2,40}》/) return true` 放在最前面，
+  // 于是任何含《作品名》的文本都被判为古文、直接走 verify-ancient（古籍出处比对 +
+  // 讹字检测），后面那些"现代文本排除"规则永远轮不到。用户贴的
+  // 「《浪淘沙·其六》引文 + 一段"金熔点1064℃"的现代说明」因此被当成古籍校勘：
+  // 既报出"疑似讹字：[{位置:侯王,建议:侯王的}]"这种无关噪声，又与事实核查混在一起。
+  // 现在的顺序：先算现代/文言特征 → 引文之外的说明文字够长就按事实核查 → 再判古文。
   function looksLikeAncient(s) {
     s = String(s || '');
-    if (/《[^》]{2,40}》/.test(s)) return true;        // 含作品名
-    if (/[，。；]"[^"]{4,}"|"[^"]{4,}"[，。；]/.test(s)) return true;  // 引号包住的成句
-    // 现代文本特征：阿拉伯数字+现代单位/符号、连续英文字母 → 不算古文
-    // （"金,柔软金黄,熔点约为1064℃,稳定性高…"这类短句多的现代查证文本，
-    //   若不排除会被下面的短句占比规则误判成古文，走错链路）
-    // 例外：文言虚词密集（≥3 处）仍算古文（古籍引文夹杂数字的情况）
-    if (/[0-9][0-9.,]*\s*(℃|%|％|公斤|千克|千米|公里|米|厘米|毫米|吨|克|升|毫升|元|美元|亿|万|平方|摄氏度|华氏度|岁|人)|[A-Za-z]{2,}/.test(s)) {
-      var dense = (s.match(/(之|乎|者|也|矣|焉|哉|兮|其|乃|夫)/g) || []).length;
-      return dense >= 3;
+    var dense   = (s.match(/之|乎|者|也|矣|焉|哉|兮|乃|夫/g) || []).length;
+    var modernU = (s.match(/[0-9][0-9.,]*\s*(?:℃|℉|%|％|公斤|千克|千米|公里|厘米|毫米|吨|克|升|毫升|元|美元|亿|万|平方|摄氏|华氏|岁)/g) || []).length;
+    var latin   = (s.match(/[A-Za-z]{2,}/g) || []).length;
+    var modern  = modernU + latin;
+
+    // 1) 现代特征明显且几乎无文言虚词 → 一律走事实核查
+    if (modern >= 2 && dense < 3) return false;
+
+    // 2) 含引文("…")或《作品名》时，先看引文之外是否还有成段说明文字。
+    //    有 → 是"引用 + 论述"，主体是现代说明，按事实核查处理。
+    var quoted   = /["“][^"”]{2,}["”]/.test(s);
+    var hasTitle = /《[^》]{2,40}》/.test(s);
+    if (quoted || hasTitle) {
+      var qLen = (s.match(/["“][^"”]{2,}["”]/g) || []).join('').length;
+      var prose = s.replace(/《[^》]{2,40}》/g, '')
+                   .replace(/["“][^"”]{2,}["”]/g, '')
+                   .replace(/[（(][^）)]{0,24}[）)]/g, '')
+                   .trim();
+      if (dense < 3 && prose.length >= 24 && prose.length >= qLen * 0.66) return false;
+      return true;
     }
-    // 多个文言虚词特征
+
+    // 3) 无引文也无《》时，出现"阿拉伯数字+现代单位"或连续英文 → 现代文本
+    //    （"金,柔软金黄,熔点约为1064℃,稳定性高…"这类短句多的现代查证文本，
+    //     不排除会被下面的短句占比规则误判成古文，走错链路）
+    if ((modernU >= 1 || latin >= 1) && dense < 3) return false;
+
+    // 4) 文言虚词 + 句读 + 短文本
     if (/(之|乎|者|也|矣|焉|哉|兮|其|乃|夫|盖|是以|所谓)/.test(s) &&
         /[，。；]/.test(s) && s.length < 200) return true;
-    // 多个四/五/七言短句
+
+    // 5) 多个四/五/七言短句
     var clauses = s.split(/[，,。；;]/).filter(function(x) { return x.trim().length >= 4; });
     var short = clauses.filter(function(x) { return x.trim().length <= 12; }).length;
     return clauses.length >= 3 && short / clauses.length >= 0.6;
@@ -877,7 +853,6 @@ body {
         });
         if (qd.kbHit) {
           renderResults((qd.searches && qd.searches[0] && qd.searches[0].results) || []);
-          showToast({ type: 'info', title: '命中知识库，直接解答', desc: '词条：' + ((qd.kbInfo && qd.kbInfo.title) || '') });
         } else {
           var qAll = (qd.searches || []).flatMap(function(s) { return s.results || []; });
           renderResults(qAll);
@@ -896,7 +871,7 @@ body {
   window._manualStore = async function(done) {
     var card = state.lastDraftCard;
     if (!card) {
-      showToast({ type: 'info', title: '没有可入库的数据，请先查证' });
+      paintStoreStatus('没有可入库的数据，请先查证', 'none');
       if (done) done();
       return;
     }
@@ -906,21 +881,51 @@ body {
         body: JSON.stringify({ card: card, action: 'manual_store' })
       });
       var t = (r.card && r.card.title) || card.title || '';
-      // 右下角提示：入库成功 → 人工审核
-      showToast({ type: 'manual', title: '已入库（人工审核）', desc: '词条：' + t });
       state.lastDraftCard = null;
+      // 逐条状态就地更新（不再弹右下角 toast）
+      paintStoreStatus('★ 已入库（人工审核）：' + t, 'auto');
       var tip = document.getElementById('store-choice-tip');
       if (tip) tip.innerHTML = '<span style="color:#1565c0;">★ 已入库（人工审核）：' + escapeHtml(t) + '</span>';
       loadKbList('');
     } catch (e) {
-      showToast({ type: 'manual', title: '入库失败', desc: e.message });
+      paintStoreStatus('入库失败：' + e.message, 'none');
     }
     if (done) done();
   };
 
+  // 批量刷新所有"逐条入库状态"行（入库/放弃之后调用）
+  function paintStoreStatus(text, kind) {
+    var els = document.querySelectorAll('.js-store-status');
+    Array.prototype.forEach.call(els, function(el) {
+      el.className = 'store-status js-store-status store-status-' + (kind || 'auto');
+      el.innerHTML = escapeHtml(text);
+    });
+  }
+
+  // 单条断言的入库状态行（问题 3：入库提示跟着每一条结果，而不是右下角弹窗）
+  //   auto    → 已自动入库（自动审核）
+  //   skipped → 达到"高"但未过自动审核门槛，可手动入库
+  //   none    → 未达入库标准，仅作核查展示
+  function storeBadgeHtml(r) {
+    var st = r && r.storeStatus;
+    var t = (r && r.storeTitle) ? '（词条：' + escapeHtml(r.storeTitle) + '）' : '';
+    if (st === 'auto') {
+      return '<div class="store-status js-store-status store-status-auto">✓ 已自动入知识库（自动审核）' + t + '</div>';
+    }
+    if (st === 'skipped') {
+      return '<div class="store-status js-store-status store-status-skip">☆ 未达自动入库标准，可手动入库' + t +
+        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:6px;" ' +
+        'onclick="window._manualStore()">入库</button>' +
+        ' <button class="btn-secondary" style="font-size:12px;padding:2px 8px;margin-left:4px;color:#999;" ' +
+        'onclick="window._skipStore()">不入库</button></div>';
+    }
+    return '<div class="store-status js-store-status store-status-none">— 未达入库标准（评级未达"高"，仅作核查展示）</div>';
+  }
+
   // 不入库：放弃当前核查结果
   window._skipStore = function() {
     state.lastDraftCard = null;
+    paintStoreStatus('已放弃入库', 'none');
     var tip = document.getElementById('store-choice-tip');
     if (tip) tip.innerHTML = '<span style="color:#999;">已放弃入库</span>';
   };

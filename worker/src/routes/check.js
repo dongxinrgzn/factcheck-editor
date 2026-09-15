@@ -11,7 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { autoAudit, approveEntry, mergeEntry, slugify, queryEntry } from '../utils/kbStore.js';
 import { buildDraftCard } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource } from '../utils/attrClassify.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -295,10 +295,12 @@ function buildSearchQuery(claim) {
     .trim();
 
   if (entity) {
-    // metric 无数字 → 是属性名，拼上；有数字 → 去掉数字后若还剩属性词则拼上
-    if (metric && !/\d/.test(metric)) return expandQueryWithAttrSynonyms(`${entity} ${metric}`, metric);
-    const metricWord = stripNumbers(metric);
-    if (metricWord && metricWord.length >= 2 && metricWord !== entity) {
+    // metric 只有是"可检索的属性名词"时才拼进检索词。
+    // 形容词/状态词型 metric 拼进去会污染召回——实测 "金 金黄" 召回的是
+    // "胡杨林一片金黄""金黄色葡萄球菌""Bao Zheng"，而只查 "金" 直接命中
+    // 维基《金》词条（正文含"黄中带红、柔软"），断言反而能被证实。
+    const metricWord = /\d/.test(metric) ? stripNumbers(metric) : metric;
+    if (metricWord && metricWord !== entity && isSearchableAttr(metricWord)) {
       return expandQueryWithAttrSynonyms(`${entity} ${metricWord}`, metricWord);
     }
     return entity;
@@ -341,6 +343,27 @@ function expandQueryWithAttrSynonyms(query, metric) {
   if (!q || !m) return q;
   const syn = (ATTR_SYNONYMS[m] || []).filter(s => !q.includes(s)).slice(0, 2);
   return syn.length ? `${q} ${syn.join(' ')}` : q;
+}
+
+// 可拼进检索词的"属性名词"白名单（含 attrClassify 的全部指标名）。
+// 为什么需要白名单：大模型给的 metric 混杂了属性名词（体重/熔点/作者）与形容词性
+// 表述（金黄/柔软/不易被氧化/最古老的采金方法）。后者拼进检索词只会稀释召回——
+// 实测 "金 熔点" 能得到官方标准 PDF 与维基《灰吹法》（含"金熔点1064.1"），
+// 而 "金 金黄" 召回的是"胡杨林一片金黄""金黄色葡萄球菌"。
+const SEARCHABLE_ATTRS = new Set([
+  ...INDICATORS.map(([, prop]) => prop),
+  '熔点', '沸点', '密度', '硬度', '颜色', '含量', '成分', '作者', '成句', '出处', '别名',
+  '出生', '逝世', '成立', '发行', '上映', '位置', '高度', '宽度', '深度', '厚度', '直径',
+  '长度', '销量', '市值', '股价', '注册资本', '总部', '创始人', '首都',
+]);
+
+/** metric 是否是"可检索的属性名词"（精确命中，或包含已知属性词，如"地壳含量"） */
+function isSearchableAttr(metric) {
+  const m = String(metric || '').trim();
+  if (!m) return false;
+  if (SEARCHABLE_ATTRS.has(m)) return true;
+  for (const a of SEARCHABLE_ATTRS) if (a.length >= 2 && m.includes(a)) return true;
+  return false;
 }
 
 export async function handleCheck(request, env) {
@@ -940,8 +963,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     claims.slice(0, maxClaims), 4, async (c) => {
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
       const metricRaw = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
-      // hint 仅传属性名（维基深度抽取用），数值不当 hint
-      const hint2 = metricRaw && !/\d/.test(metricRaw) ? metricRaw : '';
+      // hint 仅传属性名（维基深度抽取用），数值不当 hint；
+      // 非属性名词（如"金黄""柔软"）也不传——维基会拿它去正文里找数据句，
+      // 找不到反而把导言里真正相关的一句挤掉
+      const hint2 = isSearchableAttr(metricRaw) ? metricRaw : '';
       const sq = buildSearchQuery(c);
 
       // ---- 知识库优先 ----
@@ -954,8 +979,13 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       const cached = await cacheGet(env.FACT_CACHE, cacheK);
       // 注意：只复用"有结果"的缓存。空结果不入缓存，
       // 否则一次检索失败会被缓存 30 天，后续请求永远拿不到兜底机会。
+      // 同时校验相关性：早期写入的无关结果集（单字实体过滤缺失所致）直接作废。
       if (cached && Array.isArray(cached) && cached.length > 0) {
-        return { claim: c, query: sq, results: cached, cached: true, fromKB: false };
+        const cacheOk = !entity2 || filterRelevant(cached, entity2).length > 0;
+        if (cacheOk) {
+          return { claim: c, query: sq, results: cached, cached: true, fromKB: false };
+        }
+        try { await cacheDelete(env.FACT_CACHE, cacheK); } catch { /* 删不掉也无妨 */ }
       }
 
       try {
@@ -983,7 +1013,16 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           }
         }
         const annotated = annotateResults(raw, env);
-        if (annotated.length > 0) await cacheSet(env.FACT_CACHE, cacheK, annotated, SEARCH_TTL);
+        // 检索到的结果全与实体无关（实测"金 金黄"→《Bao Zheng》、
+        // "浪淘沙·其六 作者"→台湾小说《浪淘沙》）→ 不写缓存：
+        // 这种结果集一旦入库会被固化一整天，之后同问永远拿不到兜底机会。
+        // 结果照常返回给右侧"检索结果"面板（对用户透明），但评级链路会
+        // 在相关性闸门处判为"查无实据"，不会拿它当证据编纠错。
+        const stillIrrelevant = entity2 && annotated.length > 0
+          && filterRelevant(annotated, entity2).length === 0;
+        if (annotated.length > 0 && !stillIrrelevant) {
+          await cacheSet(env.FACT_CACHE, cacheK, annotated, SEARCH_TTL);
+        }
         return { claim: c, query: sq, results: annotated, cached: false, fromKB: false };
       } catch (e) {
         return { claim: c, query: sq, results: [], cached: false, error: e.message };
@@ -1014,12 +1053,32 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       };
     }
     if (!sr.results || sr.results.length === 0) {
-      return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实', sources: [], fromKB: false };
+      return { claim: sr.claim, rating: 'low', evidence: '', correction: '', sources: [], fromKB: false, noRelevantEvidence: true };
+    }
+    // 相关性闸门：检索来源与断言实体毫不相干时，不能拿它当"证据"去评级。
+    // 实测两个典型："金 金黄" 召回《Bao Zheng》（英文维基）、
+    // "浪淘沙·其六 作者" 召回台湾作家東方白的小说《浪淘沙》——LLM 会把无关来源
+    // 当成"反驳"，编出"《浪淘沙·其六》的作者是刘禹锡，而非东方白"这种荒谬纠错。
+    // 无关即视为"查无实据"：不出 correction（前端只显示"未检索到可引用证据"），
+    // 同时删掉这份检索缓存，让下次同问重新检索，坏结果不再被缓存固化一整天。
+    const relEntity = (sr.claim?.entity || '').trim();
+    const relevant = relEntity ? filterRelevant(sr.results, relEntity) : sr.results;
+    if (relevant.length === 0) {
+      try { await cacheDelete(env.FACT_CACHE, searchCacheKey(sr.query)); } catch {}
+      return {
+        claim: sr.claim,
+        rating: 'low',
+        evidence: '',
+        correction: '',
+        sources: [],
+        fromKB: false,
+        noRelevantEvidence: true,
+      };
     }
     // 证据原文完整传给 LLM（用户要求不截取内容）。
     // 提速靠评级缓存：同断言+同证据 → 复用上次评级（确定性计算，结果一致）。
     // 证据缓存 1 天，所以同一查询在证据刷新前评级输入不变，命中率高。
-    const evidence = sr.results.map(r => ({
+    const evidence = relevant.map(r => ({
       name: r.title,
       snippet: r.snippet,
       url: r.url,
@@ -1067,9 +1126,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     return {
       claim: sr.claim,
       rating: 'medium',
-      evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${sr.results.length} 条相关资料。`,
+      evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${relevant.length} 条相关资料。`,
       correction: '',
-      sources: sr.results,
+      sources: relevant,
       fromKB: false,
     };
   });
@@ -1204,6 +1263,33 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       await clearKBCache(env.FACT_KB);
       autoStored = true;
     }
+  }
+
+  // 逐条入库状态 + 检索结果去噪
+  // 用户要求：入库提示要跟着「每一条结果」走，而不是右下角弹一个 toast。
+  // 前端据此在每条断言下方渲染 已自动入库 / 可手动入库 / 未达入库标准。
+  const storedTitles = new Set();
+  if (autoStored && draftCard) storedTitles.add(draftCard.title);
+  for (const s of partialStored) storedTitles.add(s.title);
+  const skippedTitles = new Set(partialSkipped.map(s => s.title));
+
+  ratings.forEach((rt) => {
+    const ent = (rt.claim?.entity || draftCard?.title || '').trim();
+    const hasSrc = Array.isArray(rt.sources) && rt.sources.length > 0;
+    if (rt.rating === 'high' && hasSrc && storedTitles.has(ent)) rt.storeStatus = 'auto';
+    else if (rt.rating === 'high' && hasSrc) rt.storeStatus = 'skipped';
+    else rt.storeStatus = 'none';
+    rt.storeTitle = ent;
+  });
+
+  // 右侧「检索结果」面板同样只展示与实体相关的来源：相关性闸门滤过之后还剩
+  // 至少一条才替换（全被滤掉时保留原样，避免看起来像"检索失败"）
+  for (const s of checkSearches) {
+    if (s.fromKB || !Array.isArray(s.results) || s.results.length === 0) continue;
+    const ent = (s.claim?.entity || '').trim();
+    if (!ent) continue;
+    const rel = filterRelevant(s.results, ent);
+    if (rel.length > 0) s.results = rel;
   }
 
   const overallFinal = ratings.every(r => r.rating === 'high')

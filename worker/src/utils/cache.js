@@ -7,6 +7,12 @@ const KB_CACHE_TTL = 24 * 60 * 60;              // 知识库命中缓存 1 天
 // 30 天 TTL 会把某次"只剩官方站"的退化结果固化近一个月（踩过：维基结果消失、
 // 只剩林业局官网）。1 天足以抗抖动，又不会固化退化状态。
 const SEARCH_TTL = 24 * 60 * 60;
+// LLM 评级结果缓存 3 天：评级是确定性计算（同断言+同证据 → 同结果），
+// 重复查证同一条说法时直接复用，省 3-5s 的 LLM 调用。评级质量不受影响。
+const RATING_TTL = 3 * 24 * 60 * 60;
+// 断言提取（LLM 拆句）缓存 1 天：同一段文本重复提交时跳过提取调用。
+// 与检索缓存同周期——证据刷新后评级输入会变，提取结果本身不依赖证据。
+const CLAIMS_TTL = 24 * 60 * 60;
 
 /**
  * 生成检索缓存 key
@@ -29,6 +35,21 @@ export function ancientCacheKey(text) {
  */
 export function kbCacheKey(keyword) {
   return 'kbcache:' + simpleHash(keyword || '');
+}
+
+/**
+ * 生成 LLM 评级缓存 key（断言 + 全部证据片段共同决定评级结果）
+ */
+export function ratingCacheKey(claim, evidence) {
+  const evPart = (evidence || []).map(e => (e.snippet || e.text || '')).join('|');
+  return 'rate:' + simpleHash((claim || '') + '##' + evPart);
+}
+
+/**
+ * 生成断言提取缓存 key（原文 + 上下文）
+ */
+export function claimsCacheKey(text, context) {
+  return 'clm:' + simpleHash((text || '') + '|' + (context || ''));
 }
 
 /**
@@ -122,4 +143,4 @@ function simpleHash(str) {
   return Math.abs(h).toString(36);
 }
 
-export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL, SEARCH_TTL };
+export { DEFAULT_TTL, ANCIENT_TTL, KB_CACHE_TTL, SEARCH_TTL, RATING_TTL, CLAIMS_TTL };

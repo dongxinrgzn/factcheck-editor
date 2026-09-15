@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { cacheGet, cacheSet, searchCacheKey, clearKBCache, SEARCH_TTL } from '../utils/cache.js';
+import { cacheGet, cacheSet, searchCacheKey, clearKBCache, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL } from '../utils/cache.js';
 import { annotateResults } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
@@ -727,13 +727,26 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
   // ---------- 分支 B：断言模式 → 事实核查 ----------
   // 1. LLM 提取事实断言
-  const extractMsgs = buildExtractFactsMessages(text, context);
-  const claims = await callLLMJson({
-    messages: extractMsgs,
-    apiKey,
-    temperature: 0.1,
-    maxTokens: 3000,
-  });
+  // 提取结果缓存 1 天：同一段文本重复查证时跳过这次 LLM 调用（省 2-4s）。
+  // 提取是确定性计算（同输入同输出），缓存不影响结果。
+  let claims = null;
+  const claimsK = claimsCacheKey(text, context);
+  try {
+    const cachedClaims = await cacheGet(env.FACT_CACHE, claimsK);
+    if (Array.isArray(cachedClaims) && cachedClaims.length > 0) claims = cachedClaims;
+  } catch {}
+  if (!claims) {
+    const extractMsgs = buildExtractFactsMessages(text, context);
+    claims = await callLLMJson({
+      messages: extractMsgs,
+      apiKey,
+      temperature: 0.1,
+      maxTokens: 3000,
+    });
+    if (Array.isArray(claims) && claims.length > 0) {
+      await cacheSet(env.FACT_CACHE, claimsK, claims, CLAIMS_TTL);
+    }
+  }
 
   if (!Array.isArray(claims) || claims.length === 0) {
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
@@ -821,7 +834,31 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     if (!sr.results || sr.results.length === 0) {
       return { claim: sr.claim, rating: 'low', evidence: '未找到相关证据', correction: '建议人工核实', sources: [], fromKB: false };
     }
-    const evidence = sr.results.map(r => ({ name: r.title, snippet: r.snippet, url: r.url }));
+    // 证据原文完整传给 LLM（用户要求不截取内容）。
+    // 提速靠评级缓存：同断言+同证据 → 复用上次评级（确定性计算，结果一致）。
+    // 证据缓存 1 天，所以同一查询在证据刷新前评级输入不变，命中率高。
+    const evidence = sr.results.map(r => ({
+      name: r.title,
+      snippet: r.snippet,
+      url: r.url,
+    }));
+    // 评级缓存：同断言+同证据 → 复用上次评级（确定性计算，结果一致）。
+    // 证据缓存 1 天，所以同一查询在证据刷新前评级输入不变，命中率高。
+    const rateK = ratingCacheKey(sr.claim.claim, evidence);
+    try {
+      const cachedRate = await cacheGet(env.FACT_CACHE, rateK);
+      if (cachedRate && typeof cachedRate === 'object' && cachedRate.rating) {
+        return {
+          claim: sr.claim,
+          rating: cachedRate.rating,
+          evidence: cachedRate.evidence,
+          correction: cachedRate.correction || '',
+          sources: sr.results,
+          fromKB: false,
+          fromCache: true,
+        };
+      }
+    } catch {}
     const msgs = buildRateTruthMessages(sr.claim.claim, evidence);
     let lastErr = '';
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -835,7 +872,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         if (r && typeof r === 'object') {
           // LLM 用中文输出（高/中/低），此处立即归一化为英文，
           // 保证下游所有 === 'high' 判断与入库门槛能正常生效。
-          return { claim: sr.claim, ...r, rating: ratingEn(r.rating), sources: sr.results, fromKB: false };
+          const norm = { rating: ratingEn(r.rating), evidence: r.evidence, correction: r.correction || '' };
+          await cacheSet(env.FACT_CACHE, rateK, norm, RATING_TTL);
+          return { claim: sr.claim, ...r, rating: norm.rating, sources: sr.results, fromKB: false };
         }
         lastErr = 'LLM 返回空';
       } catch (e) {

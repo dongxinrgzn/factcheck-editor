@@ -63,25 +63,34 @@ export function slugify(title) {
  * 查询词条卡（先查缓存 → 别名 → 主键）
  * @returns {Object} {hit, card}
  */
-export async function queryEntry(kv, keyword) {
+export async function queryEntry(kv, keyword, opts = {}) {
   if (!keyword) return { hit: false, card: null };
+  // exactOnly：只认"精确命中"（别名索引 / 标题 hash），不做模糊匹配。
+  // 单字实体（金/水/银）必须走这条：模糊匹配在单字上等于"命中任何含该字的词条"，
+  // 正是"金 → 《Bao Zheng》"这类噪声的来源；而**精确别名命中**是安全的
+  // ——库里确实有标题为"金"的词条时，用户查"金"就该查到它。
+  const exactOnly = !!opts.exactOnly;
 
   // 1. 查缓存
+  // exactOnly 时不读缓存：缓存里存的可能是**模糊匹配**到的近似词条，
+  // 对单字实体那等于答非所问（"金"命中一个含"金"字的别的词条）。
   const cacheK = kbCacheKey(keyword);
-  const cached = await cacheGet(kv, cacheK);
-  if (cached) return { hit: true, card: cached, cached: true };
+  if (!exactOnly) {
+    const cached = await cacheGet(kv, cacheK);
+    if (cached) return { hit: true, card: cached, cached: true };
+  }
 
   // 2. 查别名索引（精确匹配）
   let slug = await kv.get(aliasKey(keyword));
   if (!slug) {
-    slug = slugify(keyword);
+    slug = slugify(keyword);   // 标题 hash：等价于"标题与查询完全一致"的精确匹配
   }
 
   // 3. 查主键
   let raw = await kv.get(entryKey(slug));
 
-  // 4. 精确未命中 → 模糊匹配
-  if (!raw) {
+  // 4. 精确未命中 → 模糊匹配（exactOnly 时跳过）
+  if (!raw && !exactOnly) {
     const kw = keyword.toLowerCase().trim();
     // 提取关键词核心词（去掉常见连接词）
     const kwChars = kw.replace(/[的年月日个各]/g, '');

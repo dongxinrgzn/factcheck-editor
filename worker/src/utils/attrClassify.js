@@ -182,21 +182,29 @@ export function isAttrNoun(metric) {
  * 必须是证据原文（片段），不能是"属实：/纠错："这类核查结论。
  * 优先级：属性词+数值单位 > 数值单位 > 属性词 > 首句。
  * 返回空串表示证据为空（调用方据此放弃该条）。
+ *
+ * opts.strict：只在"挑出的句子确实与属性相关"（含属性词或含数值单位）时才返回，
+ * 否则返回空串。用于「把检索摘要当事实来源」的场景——摘要里根本不含该属性的数据句时，
+ * 退回首句会存进一条与查询毫不相干的事实（实测："大熊猫 体长 体重" 把
+ * "概括起来，孑遗生物一定是「活化石」…" 当成了体重事实入库）。宁可少存，不能存错。
  */
 export function pickFactSentence(text, opts = {}) {
   const raw = String(text || '').replace(/\s+/g, ' ').trim();
   if (!raw) return '';
   const metric = String(opts.metric || '').trim();
+  // metric 可能是多属性串（"体长 体重"）→ 拆词，任一词命中即算"含属性词"
+  const metricWords = metric.split(/[\s、,，+/／和与及]+/).map(s => s.trim()).filter(w => w.length >= 2);
   const dataRe = makeDataRe(!!opts.isEn);
   const parts = raw.split(/(?<=[。；;！!？?])/).map(s => s.trim()).filter(Boolean);
   const list = parts.length ? parts : [raw];
   const withData = (s) => dataRe.test(s);
-  const withMetric = (s) => metric.length >= 2 && s.includes(metric);
+  const withMetric = (s) => metricWords.length > 0 && metricWords.some(w => s.includes(w));
   const pick =
     list.find(s => withMetric(s) && withData(s)) ||
     list.find(withData) ||
     list.find(withMetric) ||
     list[0];
+  if (opts.strict && !withMetric(pick) && !withData(pick)) return '';
   return String(pick || '').slice(0, 300).trim();
 }
 
@@ -208,47 +216,94 @@ export function storeFactLabel({ property, metric, entity, value }) {
   const p = String(property || '').trim();
   if (p && p !== '相关数据') return p;
   const m = String(metric || '').trim();
-  if (m && m !== '相关数据' && isAttrNoun(m)) return m;
+  if (m && m !== '相关数据') {
+    // 多属性查询的 hint 形如 "体长 体重"：**绝不能整串当标签**，否则知识库按属性
+    // 匹配时"体长"和"体重"都命中不了。拆词后取第一个属性名词。
+    const words = m.split(/[\s、,，+/／和与及]+/).map(s => s.trim()).filter(Boolean);
+    const w = words.find(x => isAttrNoun(x));
+    if (w) return w;
+  }
   const c = classifyProp(String(value || ''));
   if (c) return c;
   return String(entity || '').trim();
 }
 
 /**
- * 构造一条"可入库的事实"。返回 null 表示这条不该入库（无原文/无出处）。
- * 这是**查询链路与查证链路唯一的事实构造器**——两条链路的入库标准必须完全一致
- * （用户明确要求），任何一边单独造事实形态都会重新引入"存进去查不出来"的问题。
+ * 构造"可入库的事实列表"（0..n 条）。这是**查询链路与查证链路唯一的事实构造器**——
+ * 两条链路的入库标准必须完全一致（用户明确要求），任何一边单独造事实形态都会重新
+ * 引入"存进去查不出来"的问题。
+ *
+ * 为什么返回数组：一条数据句里常常含多个属性子句
+ *   "体长1.2—1.8米，体重60—73千克"
+ * 不拆的话只能按第一个命中的属性归类，其余属性全被埋在 value 里——
+ * 之后按"体重"查知识库永远命中不了。拆分口径与维护用的 `normalize_kb` 完全一致
+ * （共用 splitMultiAttrClauses），所以入库侧拆过之后 normalize_kb 再跑是幂等的。
+ *
  * @param {{property?:string, metric?:string, entity?:string, evidence?:string, value?:string,
- *          source?:object, rating?:string, isEn?:boolean, verifiedAt?:string}} o
+ *          source?:object, rating?:string, isEn?:boolean, verifiedAt?:string, strict?:boolean}} o
  *   value 已给定（查询链路的正则抽取结果）时直接用；否则从 evidence 原文里挑一句。
- * @returns {{label:string,value:string,metric:string,rating:string,source:object,verified_at:string,confidence:string}|null}
+ *   strict=true 用于"只有检索摘要、不确定里面有没有该属性数据句"的场景：
+ *   挑不到相关句就放弃（见 pickFactSentence）。
+ * @returns {Array<{label:string,value:string,metric:string,rating:string,source:object,verified_at:string,confidence:string}>}
  */
-export function storeFactOf(o = {}) {
+export function storeFactsOf(o = {}) {
   const evidence = String(o.evidence || '').trim();
   const explicit = String(o.value || '').trim();
   // 查询链路：正则抽取已经给出了「数据原文句」，直接用它当 value；
   // 查证链路：只有证据全文，需要从中挑出最相关的一句。
   // 两条链路都只用**原文片段**，绝不使用模型生成的结论性文字。
-  const value = explicit || (evidence ? pickFactSentence(evidence, { metric: o.metric, isEn: o.isEn }) : '');
-  if (!value) return null;
-  const label = storeFactLabel({ property: o.property, metric: o.metric, entity: o.entity, value });
-  if (!label) return null;
+  const value = explicit || (evidence
+    ? pickFactSentence(evidence, { metric: o.metric, isEn: o.isEn, strict: !!o.strict })
+    : '');
+  if (!value) return [];
   const src = o.source || {};
-  if (!src.url) return null;
-  return {
-    label,
-    value,
-    metric: String(o.metric || ''),
-    rating: o.rating || 'high',
-    source: {
-      name: src.name || '',
-      url: src.url || '',
-      official_tag: !!src.official_tag,
-      official_score: src.official_score != null ? src.official_score : (src.official_tag ? 0.9 : 0.5),
-    },
-    verified_at: o.verifiedAt || new Date().toISOString().slice(0, 10),
-    confidence: o.rating || 'high',
+  if (!src.url) return [];
+
+  const rawClauses = splitMultiAttrClauses(value, makeDataRe(!!o.isEn));
+  const parts = Array.isArray(rawClauses) && rawClauses.length > 0 ? rawClauses : [value];
+
+  const rating = o.rating || 'high';
+  const date = o.verifiedAt || new Date().toISOString().slice(0, 10);
+  const source = {
+    name: src.name || '',
+    url: src.url || '',
+    official_tag: !!src.official_tag,
+    official_score: src.official_score != null ? src.official_score : (src.official_tag ? 0.9 : 0.5),
   };
+
+  const seen = new Set();
+  const out = [];
+  for (const clause of parts) {
+    const v = String(clause || '').trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    // 拆成多条时，label 以**子句自身**识别出的属性为准——否则"体长"子句会被贴上
+    // 整句的"体重"标签，正是历史上踩过的坑（数据被贴错属性后按属性查就命中不了）。
+    // 单条时不走这条捷径，保持原优先级（事实自身 property → metric → classifyProp → 实体）。
+    const own = parts.length > 1 ? classifyProp(v) : '';
+    const label = own || storeFactLabel({ property: o.property, metric: o.metric, entity: o.entity, value: v });
+    if (!label) continue;
+    out.push({
+      label,
+      value: v,
+      metric: String(o.metric || ''),
+      rating,
+      source: { ...source },
+      verified_at: date,
+      confidence: rating,
+    });
+  }
+  return out;
+}
+
+/**
+ * 构造单条事实（storeFactsOf 的便捷封装，取第一条）。
+ * 返回 null 表示这条不该入库（无原文/无出处）。
+ * @returns {{label:string,value:string,metric:string,rating:string,source:object,verified_at:string,confidence:string}|null}
+ */
+export function storeFactOf(o = {}) {
+  const list = storeFactsOf(o);
+  return list.length > 0 ? list[0] : null;
 }
 
 /**

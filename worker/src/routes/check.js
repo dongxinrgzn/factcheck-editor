@@ -11,7 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
 import { buildDraftCard, buildStoreCardsByEntity } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactOf, bestCitableSource } from '../utils/attrClassify.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -142,10 +142,15 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
   const allowLoose = !!opts.loose && !metric;
 
   for (const probe of probes) {
-    if (!probe || probe.length < 2) continue;
+    if (!probe) continue;
+    // 单字 probe（"金""水""银"这类实体）不做模糊匹配——模糊匹配在单字上等于
+    // "命中任何含该字的词条"，是噪声来源；但**精确命中**（别名索引 / 标题一致）
+    // 必须放行，否则库里明明有"金"这个词条，用户查"金"却永远查不到。
+    // 命中后仍要走下面的属性匹配，不会把无关事实当成答案。
+    const exactOnly = probe.length < 2;
     let hit = null;
     try {
-      hit = await queryEntry(env.FACT_KB, probe);
+      hit = await queryEntry(env.FACT_KB, probe, { exactOnly });
     } catch { hit = null; }
     if (!hit || !hit.hit || !hit.card) continue;
 
@@ -827,12 +832,16 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     const factRating = confidence === '高' ? 'high' : (confidence === '低' ? 'low' : 'medium');
     // 统一补 key/time 两个字段，使查询链路与查证链路产出的事实**逐字段同形**
     // （否则"两条链路标准一致"只在核心字段上成立，辅助字段仍有差异）。
-    const mkStoreFact = (o, i) => {
-      const f = storeFactOf(o);
-      return f ? { key: `fact_${i}`, ...f, time: '' } : null;
+    // 一条数据句含多个属性子句时 storeFactsOf 会拆成多条，各自贴自身属性标签。
+    const draftFacts = [];
+    let fIdx = 0;
+    const pushFacts = (o) => {
+      for (const f of storeFactsOf(o)) draftFacts.push({ key: `fact_${fIdx++}`, ...f, time: '' });
     };
-    const draftFacts = factCard.facts.length > 0
-      ? factCard.facts.filter(f => isCitableSource(f.source)).map((f, i) => mkStoreFact({
+    if (factCard.facts.length > 0) {
+      for (const f of factCard.facts) {
+        if (!isCitableSource(f.source)) continue;
+        pushFacts({
           property: f.property,
           metric: hint,
           entity: entity || text.trim(),
@@ -844,27 +853,21 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             official_score: f.source?.official ? 0.9 : 0.5,
           },
           rating: factRating,
-        }, i)).filter(Boolean)
-      : (answer && confidence === '高' && Array.isArray(searchResults) && searchResults.length > 0
-        ? (() => {
-            // 正则没抽出数据句、但 LLM 高可信：**不把 LLM 的答案文本当事实存**
-            // （那是模型生成的表述，可能夹带推断）。改为从最优可引用来源的原文摘要里
-            // 挑一句数据原文——与查证链路完全同一条路径。
-            const src = bestCitableSource(searchResults);
-            if (!src) return [];
-            const hit = searchResults.find(r => r && r.url === src.url) || {};
-            const evi = String(hit.snippet || hit.summary || '').trim();
-            if (!evi) return [];
-            const f = mkStoreFact({
-              metric: hint,
-              entity: entity || text.trim(),
-              evidence: evi,
-              source: src,
-              rating: 'high',
-            }, 0);
-            return f ? [f] : [];
-          })()
-        : []);
+        });
+      }
+    } else if (answer && confidence === '高' && Array.isArray(searchResults) && searchResults.length > 0) {
+      // 正则没抽出数据句、但 LLM 高可信：**不把 LLM 的答案文本当事实存**
+      // （那是模型生成的表述，可能夹带推断）。改为从最优可引用来源的原文摘要里
+      // 挑一句数据原文——与查证链路完全同一条路径。
+      // strict：摘要里若根本没有与属性相关的数据句，就**放弃入库**，不要退回首句——
+      // 实测"大熊猫 体长 体重"会把"概括起来，孑遗生物一定是「活化石」…"当体重事实存进去。
+      const src = bestCitableSource(searchResults);
+      const hit = src ? (searchResults.find(r => r && r.url === src.url) || {}) : null;
+      const evi = hit ? String(hit.snippet || hit.summary || '').trim() : '';
+      if (src && evi) {
+        pushFacts({ metric: hint, entity: entity || text.trim(), evidence: evi, source: src, rating: 'high', strict: true });
+      }
+    }
 
     if (draftFacts.length > 0) {
       queryDraftCard = {

@@ -208,6 +208,19 @@ body {
   text-decoration: none;
 }
 .ref-link:hover { text-decoration: underline; }
+/* 来源行：链接 + 档位标记（教辅/题库/文库标"参考"） */
+.src-row { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; }
+.src-row .ref-link { margin-top: 0; }
+.tier-ref-tag {
+  flex: none;
+  font-size: 11px;
+  line-height: 16px;
+  color: #b26a00;
+  background: #fff4e0;
+  border: 1px solid #ffe0a3;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 /* 词条卡 */
 .kb-card {
   border: 2px solid var(--accent);
@@ -605,6 +618,19 @@ body {
         '</div></div>';
     }
 
+    // 参考出处横幅：整段文字在**教辅/题库/答案/文库**类站点上重现。
+    // 用户口径：教辅材料不等于教育局发布的课本 —— 它只能**供参考**，
+    // 不参与真实度判定、也不作为自动入库的依据（与上面的权威命中横幅区分开）。
+    if (data.referenceMatch && data.referenceMatch.hit) {
+      var rm = data.referenceMatch;
+      html += '<div class="report-section" style="background:#fffbf0;border:1px solid #ffe0a3;border-radius:8px;">' +
+        '<div style="font-weight:600;color:#b26a00;">参考出处（非课本）：整段文字在教辅/题库类站点上重现，仅供参考，不作为判断依据</div>' +
+        '<div style="font-size:12px;color:#555;margin-top:6px;">' + escapeHtml(rm.title || rm.domain || '') +
+        '　原文覆盖率 ' + Math.round((rm.coverage || 0) * 100) + '%' +
+        (rm.url ? ' <a href="' + escapeHtml(rm.url) + '" target="_blank" class="ref-link">查看原文 ↗</a>' : '') +
+        '</div></div>';
+    }
+
     if (data.ratings && data.ratings.length > 0) {
       var kbTotal = data.ratings.filter(function(r) { return r.fromKB; }).length;
       html += '<div class="report-section" style="font-size:15px;font-weight:600;">逐点核查（共 ' +
@@ -627,8 +653,13 @@ body {
         }
         if (r.sources && r.sources.length) {
           html2 += r.sources.map(function(s) {
-            return '<a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
-              escapeHtml(s.title || '') + '] ↗</a>';
+            // 教辅/题库/文库站（tier=tutoring）：只是"某本教辅收录过"，不是权威依据，
+            // 标注出来，免得读者把教辅当成教育局发布的课本（用户 2026-09-16 口径）。
+            var refTag = s.tier === 'tutoring'
+              ? '<span class="tier-ref-tag" title="教辅/题库/文库：非教育局发布的课本，仅供参考">参考</span>'
+              : '';
+            return '<div class="src-row"><a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
+              escapeHtml(s.title || '') + '] ↗</a>' + refTag + '</div>';
           }).join('');
         }
         html2 += storeBadgeHtml(r);
@@ -718,8 +749,12 @@ body {
         }
         if (r.sources && r.sources.length) {
           item += r.sources.map(function(s) {
-            return '<a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
-              escapeHtml(s.title || '') + '] ↗</a>';
+            // 教辅/题库/文库站（tier=tutoring）：只作参考，不当权威依据
+            var refTag = s.tier === 'tutoring'
+              ? '<span class="tier-ref-tag" title="教辅/题库/文库：非教育局发布的课本，仅供参考">参考</span>'
+              : '';
+            return '<div class="src-row"><a href="' + escapeHtml(s.url || '#') + '" target="_blank" class="ref-link">[' +
+              escapeHtml(s.title || '') + '] ↗</a>' + refTag + '</div>';
           }).join('');
         }
         item += storeBadgeHtml(r);

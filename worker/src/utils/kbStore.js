@@ -431,9 +431,12 @@ export function autoAudit(card) {
   // ① 至少1条事实来自官方或维基
   // 古文类额外接受 ctext.org（中国哲学书电子化计划）和 gushiwen.cn（古诗文网）为权威源
   // 另有第二种依据：**整段原文直配**（source.quote_match）——被核查的整段文字
-  // 在某个可引用页面上逐字重现（覆盖率达标，见 check.js 整段采信链路），
-  // 说明这段文字有真实出处而非杜撰。答案/教育站（零五网、菁优网）拿不到
-  // official_tag，但"原文直配"本身就是可核验的出处依据，故在此并列认可。
+  // 在一个**权威课本/官方教育来源**页面上逐字重现（覆盖率达标，见 check.js 整段采信链路），
+  // 说明这段文字出自官方发布而非杜撰。
+  // ⚠️ 口径（用户 2026-09-16）：教辅材料不等于课本。教辅/题库/答案/文库站
+  // （零五网、菁优网、学科网、百度文库…）的整段命中**已不再授予 quote_match**，
+  // 只作参考出处展示（见 officialScore.sourceTier）——它们拿不到 official_tag，
+  // 也不再有资格走这条路进库。
   const authoritativeRe = isAncient
     ? /wikipedia\.org|baike\.baidu\.com|ctext\.org|gushiwen\.cn/i
     : /wikipedia\.org|baike\.baidu\.com/i;

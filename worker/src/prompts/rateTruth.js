@@ -43,8 +43,16 @@ const SYSTEM = `基于下列检索证据，对每条断言评级。
 
 第二步（证据**确实在讲同一事物**时才评级，用中文）：
 - 高：证据与断言一致，且来源为官方/百科/权威机构
-- 中：证据来源可信，但与断言数值/表述有出入
+- 中：证据来源可信，但与断言数值/表述有出入；**或内容吻合但来源不属官方/百科/权威机构**
 - 低：证据与断言矛盾，或只能部分支持
+
+⚠️【来源档位，务必据此定级】每条证据前都标注了来源档位，评级必须受它约束：
+- 「权威课本/官方教育来源」「一般来源」（百科/新闻/机构）→ 内容吻合可判"高"
+- 「教辅·题库·答案·文库（非权威发布）」→ **教辅材料不是教育局发布的课本**，
+  它整段收录某段文字只能说明"某本教辅收录过"，**不足以证明权威出处**：
+  若证据**全部**是这一档，即使内容完全吻合，**最高只能给"中"**（evidence 照常引用原文，
+  correction 留空）。只有当同时存在官方/百科类证据时，才可判"高"。
+- 「用户生成内容（博客/问答/论坛）」→ 同上，最高"中"。
 - ⚠️ **时间限定词的模糊差异不降级**："18世纪中叶"与"18世纪末"、"约1766年"与"1766年"
   这类宽泛表述的出入，只要不推翻断言的**核心事实**（主体是谁、做了什么、对象/产物/数值是什么），
   就按"高"处理，correction 留空（evidence 里如实引用原文即可）。
@@ -62,10 +70,19 @@ const SYSTEM = `基于下列检索证据，对每条断言评级。
 
 只输出 JSON，不要解释、不要 markdown 围栏。`;
 
+// 来源档位中文标注（对应 utils/officialScore.js 的 sourceTier 返回值）
+const TIER_LABEL = {
+  textbook: '权威课本/官方教育来源',
+  tutoring: '教辅·题库·答案·文库（非权威发布）',
+  ugc: '用户生成内容（博客/问答/论坛）',
+  other: '一般来源',
+};
+
 export function buildRateTruthMessages(claim, evidence = []) {
-  const evText = evidence.map((e, i) =>
-    `[${i + 1}] ${e.name || e.source || '?'}: ${e.snippet || e.text || ''}`
-  ).join('\n');
+  const evText = evidence.map((e, i) => {
+    const tier = TIER_LABEL[e.tier] || TIER_LABEL.other;
+    return `[${i + 1}] （来源档位：${tier}）${e.name || e.source || '?'}: ${e.snippet || e.text || ''}`;
+  }).join('\n');
   const emptyHint = evText ? '' : '\n（注意：本次没有检索到任何证据，evidence 留空，rating 按"低"处理。）';
   return [
     { role: 'system', content: SYSTEM },

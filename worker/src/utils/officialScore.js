@@ -43,6 +43,46 @@ function extractDomain(url) {
   }
 }
 
+// ---------- 来源分档：决定"能当权威依据"还是"只能当参考" ----------
+// ⚠️ 口径（用户 2026-09-16 明确）：**教辅材料不等于课本**。
+// 教辅/题库/答案/文库站（零五网、菁优网、学科网、百度文库…）常整段收录教材原文，
+// 但那只能说明"某本教辅收录过这段话"，**不能**作为"这是教育局/出版社发布的课本内容"
+// 的依据。故它们只能作为**参考出处**展示，不能用来判定"高"、也不能作为自动入库的依据。
+// （此前整段原文直配只排除 UGC 站，教辅站被当成权威出处，把"高"+入库都给了它。）
+
+// 教辅 / 题库 / 答案 / 文库 / 课件站：发布方是商业机构或用户上传，非权威发布
+const TUTORING_RE = /(^|\.)(05wang|jyeoo|zxxk|xkw|zujuan|21cnjy|mofangge|51test|1010jiajiao|chazidian|koolearn|yuwenmi|yw11|zuowen|zuowen8|jiajiaoban|xueersi)\.(com|cn|net)$|zujuan\.|book118\.com|doc88\.com|docin\.com|renrendoc\.com|taodocs\.com|360doc\.com|51wendang\.com|wenku\.baidu\.com/i;
+
+// 权威课本 / 官方教育来源：政府与教育科研机构域名，以及官方出版/教育平台。
+// **只有这一档**才配享有"整段原文采信"（判"高" + 自动入库）。
+const TEXTBOOK_AUTHORITATIVE_RE = /(^|\.)gov\.cn$|(^|\.)edu\.cn$|(^|\.)ac\.cn$|(^|\.)gov$|(^|\.)edu$|(^|\.)smartedu\.cn$|(^|\.)pep\.com\.cn$|(^|\.)moe\.gov\.cn$/i;
+
+// 用户生成内容（博客/问答/论坛）：观点与转载，不构成出处
+const UGC_RE = /zhidao\.baidu\.com|(^|\.)zhihu\.com$|tieba\.baidu\.com|(^|\.)csdn\.net$|(^|\.)jianshu\.com$|(^|\.)douban\.com$|(^|\.)blog\.|bbs\.|forum/i;
+
+/**
+ * 来源分档
+ * @param {string} url
+ * @returns {'textbook'|'tutoring'|'ugc'|'other'}
+ *   textbook 政府/教育机构、官方出版与教育平台（**唯一**可作整段采信依据的档位）
+ *   tutoring 教辅/题库/答案/文库（可作证据与参考出处，但不足以判"高"、不入库）
+ *   ugc      用户生成内容（博客/问答/论坛）
+ *   other    其余（百科、新闻、企业站等，权威性由 officialScore 另行评分）
+ */
+export function sourceTier(url) {
+  const d = extractDomain(url);
+  if (!d) return 'other';
+  if (UGC_RE.test(d)) return 'ugc';
+  if (TUTORING_RE.test(d)) return 'tutoring';
+  if (TEXTBOOK_AUTHORITATIVE_RE.test(d)) return 'textbook';
+  return 'other';
+}
+
+/** 该来源是否配得上"整段原文采信"（判高 + 自动入库）——只有权威课本/官方来源够格 */
+export function isAuthoritativeTextSource(url) {
+  return sourceTier(url) === 'textbook';
+}
+
 /**
  * 百科类域名判定：维基/百度百科等是权威参考，但不是政府官方
  */

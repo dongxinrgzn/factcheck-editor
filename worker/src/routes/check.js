@@ -4,7 +4,7 @@ import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, cacheDelete, searchCacheKey, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL, kbSelectCacheKey, KB_SEL_TTL } from '../utils/cache.js';
-import { annotateResults } from '../utils/officialScore.js';
+import { annotateResults, sourceTier, isAuthoritativeTextSource } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
@@ -560,6 +560,13 @@ function buildFactCard(results, entity, queryText = '') {
  * 核查核心流程（供 /api/check 与 /api/kb/submit 复用）
  * @returns {Object} { claims, searches, ratings, rating, corrections, draftCard, factCard? }
  */
+// 给"来源列表"逐项打上来源档位（textbook/tutoring/ugc/other）。
+// 前端据此把教辅/题库/文库站标注为"参考"——用户口径：教辅材料不是教育局发布的课本，
+// 它可以出现在结果里，但不能让人误以为那是权威依据。
+function sourcesWithTier(arr) {
+  return (arr || []).map(r => (r && r.url ? { ...r, tier: sourceTier(r.url) } : r));
+}
+
 export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query', maxClaims = MAX_CLAIMS, skipSearchFallback = false } = {}) {
   const intent = mode === 'verify' ? 'assertion' : 'query';
 
@@ -1013,9 +1020,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 能召到原文页面，而拆成"实体+关键词"的短词反而召回一堆同话题噪音论文）。
   // 命中即整段采信：省掉逐点评级那一轮 LLM（主要耗时），也避免"证据与断言各说各话"
   // 造成的误判。整段召不回（改写过的段落、太长、冷门）→ 照旧逐点检索+评级。
-  let wholeMatch = null;   // {url,title,snippet,coverage,overlap,domain}
+  let wholeMatch = null;   // 权威来源命中 {url,title,snippet,coverage,overlap,domain}
+  let referenceMatch = null; // 非权威（教辅/题库/文库）命中：**只作参考出处展示**，不判高、不入库
   let wholeResults = [];   // 含命中页的整段检索结果（命中页打 quote_match 标记）
-  if (mode === 'verify' && !skipSearchFallback && env.TAVILY_KEY) {
+  // 注意：不再要求 env.TAVILY_KEY——Tavily 无 Key 时会走 keyless（见 brave.js 两级降级），
+  // 以前这个前置条件会让"没配 Key 的部署"直接跳过整段核查。
+  if (mode === 'verify' && !skipSearchFallback) {
     const ptext = String(text || '').replace(/\s+/g, ' ').trim();
     // 太短信息量不足、太长（文章级）整段检索召不回原文，两种情况都不做整段核查
     if (ptext.length >= 20 && ptext.length <= 400) {
@@ -1089,13 +1099,26 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }
         if (best) {
           try { best.domain = new URL(best.url).hostname.replace(/^www\./, ''); } catch { best.domain = ''; }
-          // 命中页打"原文直配"标记：入库门槛①（kbStore.autoAudit）认它，
-          // bestCitableSource 也优先选它作为事实出处。
-          for (const r of annot) {
-            if (r.url === best.url) { r.quote_match = true; r.quote_coverage = best.coverage; }
+          // ⚠️ 分档处置（用户 2026-09-16 口径）：**教辅材料不等于课本**。
+          // 只有权威课本/官方教育来源（政府·教育机构域名、官方出版社/教育平台）
+          // 才配享有"整段原文采信"——判"高"并允许自动入库。
+          // 教辅/题库/答案/文库站（零五网、菁优网…）整段收录同一段文字，只能说明
+          // "某本教辅收录过它"，**不能**证明"它出自教育局/出版社发布的课本"，
+          // 故只作**参考出处**展示（referenceMatch），既不判"高"、也不自动入库。
+          const tier = sourceTier(best.url);
+          best.tier = tier;
+          if (isAuthoritativeTextSource(best.url)) {
+            // 命中页打"原文直配"标记：入库门槛①（kbStore.autoAudit）认它，
+            // bestCitableSource 也优先选它作为事实出处。
+            for (const r of annot) {
+              if (r.url === best.url) { r.quote_match = true; r.quote_coverage = best.coverage; }
+            }
+            wholeMatch = best;
+            wholeResults = annot;
+          } else {
+            best.referenceOnly = true;
+            referenceMatch = best;
           }
-          wholeMatch = best;
-          wholeResults = annot;
         }
       } catch { /* 整段检索失败 → 照旧逐点核查 */ }
     }
@@ -1267,7 +1290,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         rating: 'high',
         evidence: evText,
         correction: '',
-        sources: sr.results,
+        sources: sourcesWithTier(sr.results),
         fromKB: !!sr.fromKB,
         kbInfo: sr.kb,
         wholeMatch: true,
@@ -1337,6 +1360,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       name: r.title,
       snippet: r.snippet,
       url: r.url,
+      // 来源档位一并交给评级 LLM：提示词里"高 = 来源为官方/百科/权威机构"这条规则
+      // 需要模型自己判断来源性质，而光看站名并不可靠——实测它把教辅答案站
+      // （零五网《课时作业本》解析答案）当成权威来源，据此判了"高"。
+      // 带上明确档位后，"仅教辅来源"这类证据最高只能给"中"。
+      tier: sourceTier(r.url),
     }));
     // 评级缓存：同断言+同证据 → 复用上次评级（确定性计算，结果一致）。
     // 证据缓存 1 天，所以同一查询在证据刷新前评级输入不变，命中率高。
@@ -1349,7 +1377,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           rating: cachedRate.rating,
           evidence: cachedRate.evidence,
           correction: sanitizeCorrection(cachedRate.correction),
-          sources: candidates,
+          sources: sourcesWithTier(candidates),
           fromKB: !!sr.fromKB,
           kbInfo: sr.kb,
           fromCache: true,
@@ -1376,7 +1404,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           //    rt.claim.entity 为空，回退成 fallbackTitle，把"可燃空气"的事实
           //    存进了"普里斯特利"词条——查证再命中时就答非所问；
           // ② `...r` 也会把未净化的 correction 带回来。
-          return { ...r, claim: sr.claim, rating: norm.rating, correction: norm.correction, sources: candidates, fromKB: !!sr.fromKB, kbInfo: sr.kb };
+          return { ...r, claim: sr.claim, rating: norm.rating, correction: norm.correction, sources: sourcesWithTier(candidates), fromKB: !!sr.fromKB, kbInfo: sr.kb };
         }
         lastErr = 'LLM 返回空';
       } catch (e) {
@@ -1392,7 +1420,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       ratingFailed: true,
       evidence: `自动评级未完成（${lastErr}），请人工核实。检索到 ${relevant.length} 条相关资料。`,
       correction: '',
-      sources: relevant,
+      sources: sourcesWithTier(relevant),
       fromKB: false,
     };
   });
@@ -1496,6 +1524,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     partialStored,
     partialSkipped,
     // 整段原文直配命中信息（前端据此在结果顶部显示"整段命中出处"横幅）
+    // ⚠️ 只有权威课本/官方来源命中才会出现在这里；教辅命中走下面的 referenceMatch。
     wholeMatch: wholeMatch
       ? {
           hit: true,
@@ -1504,6 +1533,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           domain: wholeMatch.domain,
           coverage: Number(wholeMatch.coverage.toFixed(2)),
           snippet: wholeMatch.snippet,
+        }
+      : null,
+    // 教辅/题库/答案/文库站的整段命中：**只作参考出处展示**（措辞须体现"非课本"），
+    // 不参与判"高"、不触发自动入库。
+    referenceMatch: referenceMatch
+      ? {
+          hit: true,
+          url: referenceMatch.url,
+          title: referenceMatch.title,
+          domain: referenceMatch.domain,
+          coverage: Number(referenceMatch.coverage.toFixed(2)),
+          tier: referenceMatch.tier,
+          snippet: String(referenceMatch.snippet || '').slice(0, 2000),
         }
       : null,
   };

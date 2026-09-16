@@ -618,13 +618,17 @@ body {
         '</div></div>';
     }
 
-    // 参考出处横幅：整段文字在**教辅/题库/答案/文库**类站点上重现。
-    // 用户口径：教辅材料不等于教育局发布的课本 —— 它只能**供参考**，
-    // 不参与真实度判定、也不作为自动入库的依据（与上面的权威命中横幅区分开）。
+    // 参考出处横幅：整段文字在**非权威课本来源**的站点上重现（教辅/题库/文库，或
+    // 维基、学术站等一般来源）。用户口径：教辅材料不等于教育局发布的课本 ——
+    // 这类命中只**供参考**，不参与真实度判定、也不作为自动入库的依据。
     if (data.referenceMatch && data.referenceMatch.hit) {
       var rm = data.referenceMatch;
+      // 措辞随档位变化：别把维基/学术站说成"教辅/题库类站点"
+      var rmHead = rm.tier === 'tutoring'
+        ? '参考出处（非课本）：整段文字在教辅/题库类站点上重现，仅供参考，不作为判断依据'
+        : '参考出处：整段文字在该站点上重现，但它不是权威课本/官方教育来源，仅供参考，不作为判断依据';
       html += '<div class="report-section" style="background:#fffbf0;border:1px solid #ffe0a3;border-radius:8px;">' +
-        '<div style="font-weight:600;color:#b26a00;">参考出处（非课本）：整段文字在教辅/题库类站点上重现，仅供参考，不作为判断依据</div>' +
+        '<div style="font-weight:600;color:#b26a00;">' + rmHead + '</div>' +
         '<div style="font-size:12px;color:#555;margin-top:6px;">' + escapeHtml(rm.title || rm.domain || '') +
         '　原文覆盖率 ' + Math.round((rm.coverage || 0) * 100) + '%' +
         (rm.url ? ' <a href="' + escapeHtml(rm.url) + '" target="_blank" class="ref-link">查看原文 ↗</a>' : '') +

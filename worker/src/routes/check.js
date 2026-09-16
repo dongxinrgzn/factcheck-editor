@@ -11,7 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
 import { buildDraftCard, buildStoreCardsByEntity } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource } from '../utils/attrClassify.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource, quoteCoverage, pickFactSentence } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -19,6 +19,16 @@ const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 // 权衡：条数越多覆盖越全，但检索+评级耗时线性增长（实测约 4s/条）。
 // 10 条 ≈ 40s，是"逐点覆盖"与"可用等待时长"的平衡点；超出部分由前端提示分段提交。
 const MAX_CLAIMS = 10;
+
+// 整段原文直配门槛（见 runCheck 的"整段原文核查"）：
+// 被核查的整段文字有 ≥70% 的内容二元组出现在同一个可引用页面的标题/摘要里、
+// 且重合二元组 ≥10 个 → 认定"这段文字有可引用出处"，整段按"高"采信。
+// 阈值依据：整段被收录时实测覆盖率 >0.9；只有**前半段**被收录（后半段是改写过的）
+// 实测约 0.6 —— 取 0.7 可以把"只收录了一部分"的句子挡在整段采信之外
+// （那半句该走逐点核查，不能搭整段的车）。另有"反算"通道（摘要有多少出自整段），
+// 用于摘要被截断、只收录了其中一段的情形。
+const QUOTE_MATCH_MIN = 0.7;
+const QUOTE_MATCH_MIN_OVERLAP = 10;
 
 /** 限并发 map：避免一次性打爆上游（LLM / 检索源）触发限流 */
 async function mapLimit(items, limit, fn) {
@@ -980,17 +990,128 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
 
+  // 1.5 整段原文核查（整段优先；用户要求："既然整段是教材原文，就先整段查——查到就
+  //     整段按'高'采信直接入库，查不到再逐点查"）。
+  //
+  // 为什么整段优先是对的：被核查的往往是**教材原文/成段引文**，这类文字通常被
+  // "答案站/教育站"整段收录。整段检索一次即可拿到权威出处（探针实测：整段原句
+  // 能召到原文页面，而拆成"实体+关键词"的短词反而召回一堆同话题噪音论文）。
+  // 命中即整段采信：省掉逐点评级那一轮 LLM（主要耗时），也避免"证据与断言各说各话"
+  // 造成的误判。整段召不回（改写过的段落、太长、冷门）→ 照旧逐点检索+评级。
+  let wholeMatch = null;   // {url,title,snippet,coverage,overlap,domain}
+  let wholeResults = [];   // 含命中页的整段检索结果（命中页打 quote_match 标记）
+  if (mode === 'verify' && !skipSearchFallback && env.TAVILY_KEY) {
+    const ptext = String(text || '').replace(/\s+/g, ' ').trim();
+    // 太短信息量不足、太长（文章级）整段检索召不回原文，两种情况都不做整段核查
+    if (ptext.length >= 20 && ptext.length <= 400) {
+      // 多形态整段检索：原文 + 去中文引号（引号会让部分检索引擎把整串当短语匹配，
+      // 召回集明显变窄）。两种形态并行，结果合并去重。
+      const bare = ptext.replace(/[“”"‘’]/g, '');
+      const variants = Array.from(new Set([ptext, bare])).filter(s => s.length >= 20);
+      try {
+        const lists = await Promise.all(variants.map(q => braveSearch({
+          query: q,
+          preferOfficial: false,
+          topK: 6,
+          tavilyApiKey: env.TAVILY_KEY,
+          diversify: true,
+          tavilyDepth: 'advanced',
+        }).catch(() => [])));
+        const merged = [];
+        const seenUrl = new Set();
+        for (const list of lists) {
+          for (const r of (Array.isArray(list) ? list : [])) {
+            if (r?.url && !seenUrl.has(r.url)) { seenUrl.add(r.url); merged.push(r); }
+          }
+        }
+        const annot = annotateResults(merged, env);
+        // 用户生成内容站（博客/问答/论坛）上出现同一段文字，只能说明"有人转载过"，
+        // 不能作为"这段文字有权威出处"的依据 → 不参与整段直配。
+        const UGC_HOST_RE = /zhidao\.baidu\.com|zhihu\.com|blog\.|bbs\.|forum|csdn\.net|jianshu\.com|douban\.com|sohu\.com|toutiao\.com|baijiahao/i;
+        let best = null;
+        for (const r of annot) {
+          if (!r?.url || !isCitableSource(r)) continue;
+          if (UGC_HOST_RE.test(r.url)) continue;
+          const page = `${r.title || ''} ${r.snippet || ''}`;
+          // 两个方向都算"整段直配"：
+          //  ① 正算：整段有多少落在页面里（页面把整段都收录了）
+          //  ② 反算：页面摘要有多少出自整段（摘要被截断、只收录了其中一段的情形）
+          const q = quoteCoverage(ptext, page);
+          const rev = quoteCoverage(page, ptext);
+          const fwd = q.coverage >= QUOTE_MATCH_MIN && q.overlap >= QUOTE_MATCH_MIN_OVERLAP;
+          const back = rev.coverage >= 0.65 && rev.overlap >= QUOTE_MATCH_MIN_OVERLAP;
+          if (!fwd && !back) continue;
+          const score = Math.max(q.coverage, rev.coverage);
+          if (!best || score > best.score) {
+            best = {
+              url: r.url,
+              title: r.title || '',
+              snippet: r.snippet || '',
+              coverage: score,
+              overlap: Math.max(q.overlap, rev.overlap),
+              score,
+            };
+          }
+        }
+        if (best) {
+          try { best.domain = new URL(best.url).hostname.replace(/^www\./, ''); } catch { best.domain = ''; }
+          // 命中页打"原文直配"标记：入库门槛①（kbStore.autoAudit）认它，
+          // bestCitableSource 也优先选它作为事实出处。
+          for (const r of annot) {
+            if (r.url === best.url) { r.quote_match = true; r.quote_coverage = best.coverage; }
+          }
+          wholeMatch = best;
+          wholeResults = annot;
+        }
+      } catch { /* 整段检索失败 → 照旧逐点核查 */ }
+    }
+  }
+
   // 2. 对每条断言检索证据（逐点覆盖：不再截断到 5 条；限并发避免打爆检索源）
   //    知识库优先：先按断言（及其实体）查 KB，命中则直接采用，不再走全网检索。
   const checkSearches = await mapLimit(
     claims.slice(0, maxClaims), 4, async (c) => {
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
+      // 整段原文已直配（wholeMatch）→ 不再逐点检索：直接沿用整段命中结果当证据。
+      // ⚠️ 但要**逐句验票**：整段覆盖率高不代表每一句都被命中页收录——实测改写过的一句
+      // （"点燃,火焰呈淡蓝色"）跟着整段一起被判"高"，而命中页里根本没有这句话。
+      // 只有本断言自身也出现在命中页里（覆盖率 ≥0.6 且重合 ≥6 个二元组）才能搭这趟车；
+      // 否则该断言照旧走下面的逐点检索 + 评级。
+      if (wholeMatch) {
+        const inPage = (() => {
+          const t = String(c.claim || '').replace(/[“”"]/g, '');
+          if (!t) return false;
+          const q = quoteCoverage(t, `${wholeMatch.title || ''} ${wholeMatch.snippet || ''}`);
+          return q.overlap >= 6 && q.coverage >= 0.6;
+        })();
+        if (inPage) {
+          // 仍先查一次 KB：库里已有该断言的事实时标记 fromKB，避免重复入库
+          // （mergeEntry 虽能去重，但 fromKB 能让前端显示"命中知识库"而不是"可手动入库"）。
+          let kb = null;
+          try { kb = await lookupKBForClaim(env, c, entity2); } catch { kb = null; }
+          if (kb) return { claim: c, query: buildSearchQuery(c), results: kb.results, kb: kb.info, fromKB: true, wholeMatch: true };
+          return {
+            claim: c,
+            query: `【整段原文直配】${wholeMatch.title || wholeMatch.domain}`,
+            results: wholeResults,
+            wholeMatch: true,
+            fromKB: false,
+          };
+        }
+      }
       const metricRaw = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
       // hint 仅传属性名（维基深度抽取用），数值不当 hint；
       // 非属性名词（如"金黄""柔软"）也不传——维基会拿它去正文里找数据句，
       // 找不到反而把导言里真正相关的一句挤掉
       const hint2 = isSearchableAttr(metricRaw) ? metricRaw : '';
-      const sq = buildSearchQuery(c);
+      // 检索词优先用抽取 LLM 给的**现代名称改写句**（searchHint）：
+      // 历史术语按字面检索只能召回"同话题噪音"（"可燃空气 水雾"召回细水雾灭火论文、
+      // "可燃空气 空气 铁制容器"召回爆轰研究），改写句（"氢气在空气中燃烧生成水雾"）
+      // 才能召回维基《氫氣》与化学实验页面——探针实测，两者召回质量天差地别。
+      // 改写句只当检索词用：评级的对象始终是原断言，语义不会漂移。
+      // 断言不含历史术语时抽取侧留空，此时照旧用 buildSearchQuery(整句/实体+关键词)。
+      const sqHint = (typeof c.searchHint === 'string') ? c.searchHint.trim() : '';
+      const sq = sqHint.length >= 6 ? sqHint : buildSearchQuery(c);
 
       // ---- 知识库优先 ----
       const kb = await lookupKBForClaim(env, c, entity2);
@@ -1015,7 +1136,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         // 必须传 tavilyApiKey：braveSearch 在维基命中时会短路，结果常清一色
         // zh.wikipedia.org。diversifyDomains 需要 Tavily 才能补出第二个域名，
         // 否则自动入库门槛②（≥2 域名）永远过不了。
-        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 6, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: !skipSearchFallback });
+        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 6, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: !skipSearchFallback, tavilyDepth: 'advanced' });
         // 以下兜底会额外消耗子请求额度（Cloudflare 单次调用上限 50）。
         // 古文查证等复合流程调用时置 skipSearchFallback，避免超限整体失败。
         if (!skipSearchFallback) {
@@ -1033,6 +1154,32 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
               const tv = await tavilySearch(sq, { apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'basic' });
               if (tv && tv.results && tv.results.length > 0) raw = tv.results;
             } catch { /* 兜底失败保持空 */ }
+          }
+          // 弱结果补一轮：主检索词（整句断言）召不回 **2 条**以上相关结果时，
+          // 用「实体 + 辨识性关键词」再搜一次并并入（主结果在前，地位不变）。
+          // 两种检索词互补：整句擅长召回"讨论这件事"的页面，但对历史术语
+          // （"可燃空气"）的字面召回差；keywords 里有抽取 LLM 给的现代名称
+          // （氢气/爆鸣/水雾），能直接召回维基《氫氣》《爆鸣气》——正是这类
+          // 权威词条里的"与空气混合点燃发出爆鸣声、燃烧生成水"能把断言撑到"高"。
+          // 深度也互补：主搜 advanced（语义好但对术语字面召回方差大），
+          // 补搜 basic（实测同一主题 basic 与 advanced 的召回集差异很大）。
+          const kwList = String(c.keywords || '').split(/[\s、,，+/／]+/).map(s => s.trim())
+            .filter(s => s && s !== entity2 && !entity2.includes(s) && !/\d/.test(s))
+            .slice(0, 2);
+          const sq2 = (entity2 && kwList.length) ? `${entity2} ${kwList.join(' ')}` : '';
+          if (sq2 && sq2 !== sq) {
+            const relNow = entity2
+              ? filterRelevant(raw, entity2, { strictName: true, claimText: c.claim })
+              : raw;
+            if (relNow.length < 2) {
+              try {
+                const raw2 = await braveSearch({ query: sq2, preferOfficial: true, topK: 5, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: false, tavilyDepth: 'basic' });
+                const seen = new Set(raw.map(r => r.url));
+                for (const r of raw2) {
+                  if (r?.url && !seen.has(r.url)) { raw.push(r); seen.add(r.url); }
+                }
+              } catch { /* 忽略 */ }
+            }
           }
         }
         const annotated = annotateResults(raw, env);
@@ -1058,23 +1205,45 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   // 表现为部分条目 callLLMJson 抛错 → 只能落到 catch（rating:'medium'、evidence:'评级失败'），
   // 报告里就会出现莫名其妙的"评级失败"且 sources 为空。改为限并发 + 失败重试。
   const ratings = await mapLimit(checkSearches, 4, async (sr) => {
-    // 知识库命中的断言：直接用 KB 已审核的事实作答，不再打 LLM 评级
-    // （KB 里的内容已经过自动/人工审核，且能省下一次 LLM 调用）
-    if (sr.fromKB && sr.kb) {
-      // KB 可能命中多条相关事实（如体重有野生/饲养两条），全部列入依据
-      const kbEvi = (Array.isArray(sr.kb.facts) && sr.kb.facts.length > 0)
-        ? sr.kb.facts.map(f => `${f.label}：${f.value}`).join('；')
-        : `${sr.kb.factLabel}：${sr.kb.factValue}`;
+    // ---- 整段原文直配：这整段文字已在某个可引用页面上逐字重现（覆盖率达标）----
+    // 用户明确要求："查到就整段按高采信、直接入库" —— 不再逐点喂 LLM 评级：
+    // ① 逐点评级的输入（同话题噪音论文）常常不如"整段命中页"这个事实本身有力；
+    // ② 省掉最耗时的一轮 LLM。
+    // 证据仍取**原文句**（不生成任何文字）：从命中页里挑与本断言最贴近的一句；
+    // 挑不出（摘要被截断）就留空 → 该断言不产生事实（宁可少存，不可存错）。
+    if (sr.wholeMatch) {
+      const evText = sr.fromKB
+        ? (sr.kb?.facts || []).slice(0, 2).map(f => `${f.label || ''}：${f.value || ''}`).join('；')
+        : pickFactSentence(String(wholeMatch.snippet || ''), {
+            metric: sr.claim?.metric || '',
+            anchor: sr.claim?.claim || '',
+            requireAnchor: true,
+          });
       return {
         claim: sr.claim,
         rating: 'high',
-        evidence: kbEvi,
+        evidence: evText,
         correction: '',
         sources: sr.results,
-        fromKB: true,
+        fromKB: !!sr.fromKB,
         kbInfo: sr.kb,
+        wholeMatch: true,
+        wholeMatchInfo: {
+          url: wholeMatch.url, title: wholeMatch.title,
+          coverage: Number(wholeMatch.coverage.toFixed(2)), domain: wholeMatch.domain,
+        },
       };
     }
+    // 知识库命中的断言：KB 事实作为**证据**走与全网证据同一把尺子（评级 LLM），
+    // 不再直接判"高"。label 匹配只能保证"同实体"，保证不了"这条事实支撑这条断言"
+    // （实测：词条里"引爆过程"的事实被当成"产生水雾"断言的支撑，评出假"高"）。
+    // KB 内容本身经过审核，当证据是安全的；支撑与否交给评级环节判断。
+    let relevant;
+    let candidates;
+    if (sr.fromKB && sr.kb) {
+      candidates = sr.results;
+      relevant = sr.results; // KB 结果是按实体/标签匹配出来的，直接当证据
+    } else {
     if (!sr.results || sr.results.length === 0) {
       return { claim: sr.claim, rating: 'low', evidence: '', correction: '', sources: [], fromKB: false, noRelevantEvidence: true };
     }
@@ -1087,9 +1256,24 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     const relEntity = (sr.claim?.entity || '').trim();
     // strictName：短专名（人名/物名）只认完整实体词，挡住"普里斯特→普里斯特菲尔德球场"式假阳性。
     // claimText：历史术语（"可燃空气"=氢气）按字面匹配必然全灭时的兜底判据。
-    const relevant = relEntity
-      ? filterRelevant(sr.results, relEntity, { strictName: true, claimText: sr.claim?.claim })
-      : sr.results;
+    // 同实体证据池：同一实体的多条断言（"可燃空气 点燃→爆鸣声"与"→水雾"）检索词不同、
+    // 召回互补——把同实体其它断言搜到的结果并入本条的证据候选，由评级 LLM 逐条判断
+    // 是否支撑本断言。避免"化学史页面明明检索到过、只是没落在这一条的检索词里"的错杀。
+    candidates = sr.results;
+    if (relEntity) {
+      candidates = [...sr.results];
+      const seen = new Set(sr.results.map(r => r.url));
+      for (const other of checkSearches) {
+        if (other === sr || other.fromKB) continue;
+        if ((other.claim?.entity || '').trim() !== relEntity) continue;
+        for (const r of other.results || []) {
+          if (r?.url && !seen.has(r.url)) { candidates.push(r); seen.add(r.url); }
+        }
+      }
+    }
+    relevant = relEntity
+      ? filterRelevant(candidates, relEntity, { strictName: true, claimText: sr.claim?.claim })
+      : candidates;
     if (relevant.length === 0) {
       try { await cacheDelete(env.FACT_CACHE, searchCacheKey(sr.query)); } catch {}
       return {
@@ -1101,6 +1285,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         fromKB: false,
         noRelevantEvidence: true,
       };
+    }
     }
     // 证据原文完整传给 LLM（用户要求不截取内容）。
     // 提速靠评级缓存：同断言+同证据 → 复用上次评级（确定性计算，结果一致）。
@@ -1121,8 +1306,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           rating: cachedRate.rating,
           evidence: cachedRate.evidence,
           correction: sanitizeCorrection(cachedRate.correction),
-          sources: sr.results,
-          fromKB: false,
+          sources: candidates,
+          fromKB: !!sr.fromKB,
+          kbInfo: sr.kb,
           fromCache: true,
         };
       }
@@ -1142,9 +1328,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           // 保证下游所有 === 'high' 判断与入库门槛能正常生效。
           const norm = { rating: ratingEn(r.rating), evidence: r.evidence, correction: sanitizeCorrection(r.correction) };
           await cacheSet(env.FACT_CACHE, rateK, norm, RATING_TTL);
-          // ⚠️ 这里必须显式覆盖 correction：`...r` 会把模型原始 correction 带出来，
-          // 使上面刚净化过的值被悄悄还原（评级缓存里是净化的、返回给用户的是原始的）。
-          return { claim: sr.claim, ...r, rating: norm.rating, correction: norm.correction, sources: sr.results, fromKB: false };
+          // ⚠️ claim/rating/correction 必须放在 `...r` 之后显式覆盖：
+          // ① 模型可能多输出一个 claim 字段（曾把 sr.claim 覆盖成空）→ 入库侧
+          //    rt.claim.entity 为空，回退成 fallbackTitle，把"可燃空气"的事实
+          //    存进了"普里斯特利"词条——查证再命中时就答非所问；
+          // ② `...r` 也会把未净化的 correction 带回来。
+          return { ...r, claim: sr.claim, rating: norm.rating, correction: norm.correction, sources: candidates, fromKB: !!sr.fromKB, kbInfo: sr.kb };
         }
         lastErr = 'LLM 返回空';
       } catch (e) {
@@ -1165,28 +1354,18 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     };
   });
 
-  // 4. 知识库入库：事实由 buildDraftCard（→ 统一构造器 storeFactOf）生成，
-  //    与查询链路的事实形态逐字段一致（属性名 label + 证据原文 value + 可引用出处）。
-  //    自动入库统一走 autoStoreCard —— 门槛（autoAudit 四关，含"每条 rating 必须 high"）
-  //    与合并策略（同名 mergeEntry / 否则 approveEntry）只有这一个实现，查询链路调的是同一个。
-  //    注：这里不再单独判 overall —— overall==='高' 等价于"每条 rating 都 high"，
-  //    正是 autoAudit 第③关，两套判据合成一套，从根上消除两条链路标准不一致。
+  // 4. 知识库入库：**按实体分组**入库（每个实体一张卡），事实由统一构造器生成。
+  //    为什么不再用 buildDraftCard 当入库卡：它的标题取"第一条断言的实体"，而事实
+  //    取自**全部**断言 —— 多实体段落里会把别的实体的事实存进首个实体的词条
+  //    （实测"可燃空气"的爆轰速度事实被存进"普里斯特利"词条，之后查证命中答非所问）。
+  //    buildDraftCard 现在只用于前端展示（draftCard 字段），入库一律走按实体分组的卡。
   const draftCard = buildDraftCard(claims, ratings, checkSearches);
   let autoStored = false;
-  {
-    const res = await autoStoreCard(env, draftCard);
-    autoStored = res.stored;
-  }
-
-  // 4b. 部分入库：长文本里常有 1-2 条存疑，整体过不了门槛，但其中"高"的那些事实点
-  //     本身达标，应当自动入库——否则用户会遇到"明明大部分都判高，却一条都没入库"。
-  //     逐条事实同样由统一构造器生成（buildStoreCardsByEntity → storeFactOf），
-  //     不存在"整体入库用一套形态、部分入库用另一套形态"的偏差。
   const partialStored = [];
   const partialSkipped = [];
   let partialDebug = null;
-  if (!autoStored) {
-    const { cards, considered } = buildStoreCardsByEntity(ratings, checkSearches, draftCard?.title || '');
+  {
+    const { cards, considered } = buildStoreCardsByEntity(ratings, checkSearches);
     partialDebug = { considered, entities: cards.map(c => c.title) };
 
     for (const item of cards) {
@@ -1273,5 +1452,16 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     autoStored,
     partialStored,
     partialSkipped,
+    // 整段原文直配命中信息（前端据此在结果顶部显示"整段命中出处"横幅）
+    wholeMatch: wholeMatch
+      ? {
+          hit: true,
+          url: wholeMatch.url,
+          title: wholeMatch.title,
+          domain: wholeMatch.domain,
+          coverage: Number(wholeMatch.coverage.toFixed(2)),
+          snippet: wholeMatch.snippet,
+        }
+      : null,
   };
 }

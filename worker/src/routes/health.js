@@ -2,7 +2,7 @@
 // ?probe=1 时对各检索源做一次真实连通性自测（诊断"搜索结果变少"类问题）
 
 import { jsonResponse } from '../utils/cors.js';
-import { wikiSearch, ddgSearch, searxSearch, tavilySearch, bingWebSearch } from '../sources/brave.js';
+import { wikiSearch, ddgSearch, searxSearch, tavilySearch } from '../sources/brave.js';
 
 export async function handleHealth(request, env) {
   const kvStatus = {};
@@ -44,12 +44,12 @@ export async function handleHealth(request, env) {
       test('wikipedia', () => wikiSearch(qWiki, 3, '')),
       test('duckduckgo', () => ddgSearch(qWeb, 5)),
       test('searxng', () => searxSearch(qWiki, 5)),
-      test('bing', () => bingWebSearch(qWeb, 5)),
       test('tavily', () => tavilySearch(qWeb, {
         apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'basic',
       })),
     ]);
     data.probe = probe;
+    data.sources = ['wikipedia', 'tavily']; // Bing（2026-09-16 弃用）、DDG/SearXNG（反爬失效）已移出主链路
     if (q) data.samples = samples;
   }
 

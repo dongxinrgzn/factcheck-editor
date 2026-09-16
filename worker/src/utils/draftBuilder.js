@@ -3,6 +3,28 @@
 import { storeFactsOf, bestCitableSource } from './attrClassify.js';
 
 /**
+ * 卡内事实去重：label+value 完全相同，或 value 相同（忽略 label）时只留一条。
+ * 与 kbStore.mergeEntry 的规则①②同口径 —— mergeEntry 只在"合并到已存在词条"时生效，
+ * 新建词条（approveEntry）不做去重，于是同一张卡里同一句原文会被存两遍
+ * （实测：整段原文直配时，"可燃空气"词条出现两条完全相同的原文事实）。
+ * 同一句原文换个 label 也仍是同一条事实，故 value 相同即视为重复。
+ */
+function dedupeFacts(list) {
+  const out = [];
+  const seenLabelValue = new Set();
+  const seenValue = new Set();
+  for (const f of list) {
+    const v = String(f?.value || '');
+    const lv = `${f?.label || ''}\u0000${v}`;
+    if (!v || seenLabelValue.has(lv) || seenValue.has(v)) continue;
+    seenLabelValue.add(lv);
+    seenValue.add(v);
+    out.push(f);
+  }
+  return out;
+}
+
+/**
  * 由核查结果构建知识库词条草稿
  * @param {Array} claims LLM 提取的断言 [{claim, entity, metric, time}]
  * @param {Array} ratings 评级结果 [{claim, rating, evidence, correction, sources, fromKB}]
@@ -45,6 +67,7 @@ export function buildDraftCard(claims, ratings, searchResults) {
       source: src,
       rating: rt.rating || 'medium',
       verifiedAt: today,
+      anchor: c.claim || '', // 挑句锚点：无属性词时按与断言的关联度挑句，避免存进段落铺垫句
     })) {
       facts.push({ key: `fact_${facts.length}`, ...f, time: c.time || '' });
     }
@@ -69,7 +92,7 @@ export function buildDraftCard(claims, ratings, searchResults) {
     title: entity,
     aliases: [],
     category: 'auto',
-    facts,
+    facts: dedupeFacts(facts),
     references: refs,
   };
 }
@@ -91,7 +114,10 @@ export function buildStoreCardsByEntity(ratings, searchResults, fallbackTitle = 
     const src = bestCitableSource(results);
     if (!src) return;
     const rt2 = rt.claim || {};
-    const ent = String(rt2.entity || fallbackTitle || '').trim();
+    // 实体必须来自断言自身。不要回退到 fallbackTitle——那是"第一条断言的实体"，
+    // 拿它兜底会把别的实体的事实存进错误词条（实测：可燃空气的事实被存进
+    // "普里斯特利"词条，之后查证命中就答非所问）。宁可不入库，不可入错库。
+    const ent = String(rt2.entity || '').trim();
     if (!ent) return;
     const built = storeFactsOf({
       metric: rt2.metric || '',
@@ -99,6 +125,7 @@ export function buildStoreCardsByEntity(ratings, searchResults, fallbackTitle = 
       evidence: rt.evidence || '',
       source: src,
       rating: 'high',
+      anchor: rt2.claim || '', // 挑句锚点：无属性词时按与断言的关联度挑句
     });
     if (built.length === 0) return;
     if (!byEntity.has(ent)) byEntity.set(ent, { facts: [], refs: [] });
@@ -129,10 +156,12 @@ export function buildStoreCardsByEntity(ratings, searchResults, fallbackTitle = 
       }
     }
     if (bucket.facts.length === 0) continue;
+    const uniqFacts = dedupeFacts(bucket.facts);
+    if (uniqFacts.length === 0) continue;
     cards.push({
       title: ent,
-      card: { title: ent, aliases: [], category: 'auto', facts: bucket.facts, references: uniqRefs },
-      facts: bucket.facts,
+      card: { title: ent, aliases: [], category: 'auto', facts: uniqFacts, references: uniqRefs },
+      facts: uniqFacts,
       refs: uniqRefs,
     });
   }

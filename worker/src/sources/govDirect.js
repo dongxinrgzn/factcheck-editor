@@ -4,7 +4,7 @@
 // - 有结果：返回官方站点的真实文章（标题/摘要/链接），URL 为 gov.cn/edu.cn，自动打★官方
 // - 无结果：不返回任何内容（避免"点开空白/0结果"的无效入口）
 
-import { bingSiteSearch, bingWebSearch, tavilySearch } from './brave.js';
+import { tavilySearch } from './brave.js';
 
 // 判断 URL 是否为政府/教育官方域名
 function isOfficialHost(url) {
@@ -78,31 +78,10 @@ export async function searchGovDirect(query, opts = {}) {
     } catch { /* 走兜底 */ }
   }
 
-  // 兜底通道：免费爬取（仅当 Tavily 无 key 或结果不足时）
-  // 注：SearXNG 公共实例与 DDG 已被反爬/失效，兜底只用 Bing（实测可用）
-  if (hits.length < 3) {
-    let globalHits = [];
-    try {
-      const g = await bingWebSearch(query, 18);
-      globalHits = g.filter(r => isOfficialHost(r.url))
-        .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
-    } catch { /* ignore */ }
-
-    let siteHits = [];
-    if (globalHits.length < 4) {
-      const per = await Promise.all(
-        OFFICIAL_DOMAINS.map(async ({ domain }) => {
-          const bing = await bingSiteSearch(domain, query, perDomain).catch(() => []);
-          return bing;
-        })
-      );
-      siteHits = per.flat()
-        .filter(h => h && h.url && isOfficialHost(h.url))
-        .map(r => ({ ...r, source: 'gov-direct', site_name: siteNameFromUrl(r.url) }));
-    }
-    hits = mergeByUrl(hits, mergeByUrl(globalHits, siteHits))
-      .filter(h => h && h.url && isOfficialHost(h.url));
-  }
+  // 兜底通道：已随 Bing 弃用而移除（2026-09-16）。
+  // 旧兜底是 Bing 全网/site: 抓取，但 Bing HTML 抓取已完全失效（任意查询返回无关页，
+  // 再被 isOfficialHost 过滤后必然为空），留着只会白耗 ~10 个子请求。
+  // Tavily 拿不到官方结果时就让它为空——官方站置顶只是加分项，不是必需品。
 
   // 权威站点加权排序：统计局/政府网/部委在前，edu.cn 在后
   hits.sort((a, b) => govRank(a.url) - govRank(b.url));

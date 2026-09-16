@@ -51,19 +51,9 @@ export function entityTermOf(query) {
 }
 
 // 断言句 → 内容二元组（"主体严格匹配全灭"时的兜底判据）。
-// 剔掉含虚字的二元组，避免"的了是在""与及和"这类公共串让任意结果都算相关。
-const FUNC_CHAR = new Set('的了是在有和与及这那它他她我你您们个中于对从把被而且并或则也就都还只不没很将会能可要上下内外前后同时以之类其此等并'.split(''));
-function contentBigrams(text) {
-  const s = normZh(text || '').replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '');
-  const out = [];
-  for (let i = 0; i < s.length - 1; i++) {
-    const bg = s.slice(i, i + 2);
-    if (!/[\u4e00-\u9fa5]{2}/.test(bg)) continue;
-    if (FUNC_CHAR.has(bg[0]) || FUNC_CHAR.has(bg[1])) continue;
-    if (!out.includes(bg)) out.push(bg);
-  }
-  return out;
-}
+// 唯一实现在 utils/attrClassify.js（contentBigrams），这里复用同一份口径，
+// 避免"相关性兜底"与"事实挑句"两边各写一份然后漂移。
+import { contentBigrams } from '../utils/attrClassify.js';
 
 /**
  * 相关性过滤：结果必须与查询实体相关
@@ -228,7 +218,7 @@ export function filterRelevant(results, entity, opts = {}) {
   // 阈值取 3 是有意的保守值——单个公共二元组（如"空气""产生"）随意一个页面都能撞上，
   // 3 个不同的实词二元组同时出现，才足以说明这一页确实在讲同一件事。
   if (!opts.claimText) return out;
-  const claimBgs = contentBigrams(opts.claimText);
+  const claimBgs = contentBigrams(normZh(opts.claimText)); // 繁体摘要也要能对上
   if (claimBgs.length < 3) return out;
   return list.filter(r => {
     const hay = normZh(`${r.title || ''} ${r.snippet || ''}`);
@@ -564,106 +554,9 @@ export async function ddgSiteSearch(domain, query, topK = 3) {
   }
 }
 
-// ---------- Bing site: 搜索（DDG 限流时的独立兜底通道） ----------
-function decodeBingUrl(href) {
-  // Bing 跳转链接 /ck/a?...&u=a1<base64>，去掉 a1 前缀后 base64 解码
-  const m = href.match(/[?&]u=a1([A-Za-z0-9+/=_-]+)/);
-  if (m) {
-    try {
-      let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
-      while (b64.length % 4) b64 += '=';
-      const dec = atob(b64);
-      if (/^https?:\/\//.test(dec)) return dec;
-    } catch { /* fall through */ }
-  }
-  return href;
-}
-
-/**
- * Bing 通用网页搜索（HTML 抓取，无需 API Key）
- * DDG/SearXNG 相继被反爬或实例失效后的免费兜底源。
- * @returns {Promise<Array<{title,url,snippet}>>}
- */
-export async function bingWebSearch(query, topK = 5) {
-  try {
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN&count=${Math.max(topK * 3, 15)}`;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    const resp = await fetch(url, {
-      signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-      },
-    });
-    clearTimeout(t);
-    if (!resp.ok) return [];
-    const html = await resp.text();
-    const blocks = html.split(/<li class="b_algo"/).slice(1);
-    const out = [];
-    for (const blk of blocks) {
-      const linkM = blk.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-      if (!linkM) continue;
-      const realUrl = decodeBingUrl(linkM[1]);
-      let snippet = '';
-      const capM = blk.match(/<div class="b_caption"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
-      if (capM) snippet = stripHtml(capM[1]);
-      if (!snippet) {
-        const pM = blk.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/);
-        if (pM) snippet = stripHtml(pM[1]);
-      }
-      out.push({ title: stripHtml(linkM[2]), url: realUrl, snippet });
-      if (out.length >= topK) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-export async function bingSiteSearch(domain, query, topK = 5) {
-  try {
-    const q = `site:${domain} ${query}`;
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=zh-CN&count=20`;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 9000);
-    const resp = await fetch(url, {
-      signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-      },
-    });
-    clearTimeout(t);
-    if (!resp.ok) return [];
-    const html = await resp.text();
-
-    // 每个结果块 <li class="b_algo"> ... <h2><a href="...">title</a></h2> ... <p ...>snippet</p>
-    const blocks = html.split(/<li class="b_algo"/).slice(1);
-    const out = [];
-    for (const blk of blocks) {
-      const linkM = blk.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-      if (!linkM) continue;
-      const realUrl = decodeBingUrl(linkM[1]);
-      let host = '';
-      try { host = new URL(realUrl).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
-      if (host !== domain && !host.endsWith('.' + domain)) continue;
-      // 摘要：b_caption 内的 <p>
-      let snippet = '';
-      const capM = blk.match(/<div class="b_caption"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
-      if (capM) snippet = stripHtml(capM[1]);
-      if (!snippet) {
-        const pM = blk.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/);
-        if (pM) snippet = stripHtml(pM[1]);
-      }
-      out.push({ title: stripHtml(linkM[2]), url: realUrl, snippet });
-      if (out.length >= topK) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
+// ---------- Bing ----------
+// Bing HTML 抓取已于 2026-09-16 整体弃用（探针实测任意查询返回无关页，等于死源）。
+// bingWebSearch / bingSiteSearch / decodeBingUrl 已删除；主链路只剩 维基 → Tavily。
 
 // ---------- SearXNG（末选） ----------
 export async function searxSearch(query, topK = 5) {
@@ -787,17 +680,11 @@ async function diversifyDomains(results, query, topK, tavilyApiKey) {
   if (!query) return results;
 
   const extra = [];
-  // 多样性补充：Tavily（有 key）→ Bing（免费兜底）。DDG/SearXNG 已从主链路移除。
+  // 多样性补充：Tavily（Bing HTML 抓取已失效，2026-09-16 弃用）
   if (tavilyApiKey) {
     try {
       const tv = await tavilySearch(query, { apiKey: tavilyApiKey, topK: topK + 3, searchDepth: 'basic' });
       for (const r of tv.results || []) if (r?.url) extra.push(r);
-    } catch { /* 忽略 */ }
-  }
-  if (hostSetOf([...results, ...extra]).size < 2) {
-    try {
-      const bing = await bingWebSearch(query, topK + 3);
-      for (const r of bing) if (r?.url) extra.push(r);
     } catch { /* 忽略 */ }
   }
   // 上游已有域名清一色时，优先让"新域名"的结果排在前面（否则 slice 截断会
@@ -819,16 +706,21 @@ function hostOf(r) {
 /**
  * 综合全网检索（多源兜底）
  *
- * 主链路（2026-09 重构）：维基 → Bing → Tavily。
- * DDG html 端与 SearXNG 公共实例已被反爬/失效（探针实测 0 结果），
- * 从主链路移除；Bing HTML 抓取实测可用（~200ms）且无需 API Key。
+ * 主链路（2026-09-16）：维基 → Tavily。
+ * DDG html 端与 SearXNG 公共实例已被反爬/失效（探针实测 0 结果），早已移除；
+ * **Bing HTML 抓取 2026-09-16 弃用**——探针实测任意查询返回的都是无关页
+ * （微波炉清洁/eBay/成人站），解析出的"结果"与检索词毫无关系，等于死源，
+ * 留在链路里只会污染证据集并白耗子请求。
  * ddgSearch/searxSearch 函数仍保留——govDirect 兜底通道与健康探针在用。
  *
  * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey, diversify }
  *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
  */
 export async function braveSearch(opts = {}) {
-  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true } = opts;
+  // tavilyDepth：Tavily 检索深度（basic=1 信用 / advanced=2 信用）。
+  // 查证链路传 'advanced'——教材原句这类长句检索，advanced 对自然语言的理解
+  // 明显更好（实测同一句子 basic 召回人物传记，advanced 能直接召回原题页）。
+  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true, tavilyDepth = 'basic' } = opts;
   if (!query) return [];
 
   // 1. 维基（权威来源 + 深度抽取属性数据句）
@@ -837,19 +729,15 @@ export async function braveSearch(opts = {}) {
     let merged = dedupe([...wiki]);
     // 域名多样性兜底：维基结果常清一色 zh.wikipedia.org，而自动入库门槛要求
     // 「≥2 个独立域名」，单一域名会让高可信事实永远过不了审。域名单一时
-    // 补 Bing/Tavily 凑多样性。diversify=false 用于子请求额度紧张的复合流程。
+    // 补 Tavily 凑多样性。diversify=false 用于子请求额度紧张的复合流程。
     if (diversify) merged = await diversifyDomains(merged, query, topK, tavilyApiKey);
     return merged.slice(0, topK);
   }
 
-  // 2. 维基无结果 → Bing（免费、快）
-  const bing = await bingWebSearch(query, topK);
-  if (bing.length > 0) return bing.slice(0, topK);
-
-  // 3. Bing 也无结果 → Tavily（付费，最后兜底）
+  // 2. 维基无结果 → Tavily（付费兜底）
   if (tavilyApiKey) {
     try {
-      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'basic' });
+      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: tavilyDepth });
       if (tavily.results && tavily.results.length > 0) return tavily.results.slice(0, topK);
     } catch {}
   }

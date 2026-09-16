@@ -430,12 +430,17 @@ export function autoAudit(card) {
 
   // ① 至少1条事实来自官方或维基
   // 古文类额外接受 ctext.org（中国哲学书电子化计划）和 gushiwen.cn（古诗文网）为权威源
+  // 另有第二种依据：**整段原文直配**（source.quote_match）——被核查的整段文字
+  // 在某个可引用页面上逐字重现（覆盖率达标，见 check.js 整段采信链路），
+  // 说明这段文字有真实出处而非杜撰。答案/教育站（零五网、菁优网）拿不到
+  // official_tag，但"原文直配"本身就是可核验的出处依据，故在此并列认可。
   const authoritativeRe = isAncient
     ? /wikipedia\.org|baike\.baidu\.com|ctext\.org|gushiwen\.cn/i
     : /wikipedia\.org|baike\.baidu\.com/i;
   const hasAuthoritative = card.facts.some(f =>
     f.source && (
       f.source.official_tag ||
+      f.source.quote_match ||
       authoritativeRe.test(f.source.url || '')
     )
   );
@@ -472,9 +477,16 @@ export function autoAudit(card) {
     allHosts.length === 1 &&
     authoritativeHostRe.test(allHosts[0]) &&
     card.facts.length >= 3;
+  // 第三种放行：**整段原文直配**（覆盖率 ≥0.75）——被核查的整段文字在一个可引用页面上
+  // 逐字重现，本身就是"非杜撰、有出处"的强证据；此时检索往往只召回这一个原文页
+  // （同题其它页面不收录该段文字），强求 ≥2 域名会让整段采信永远过不了审。
+  // 覆盖面要求 ≥0.75（高于直配门槛 0.55），把"只重合一两句"的情况排除在外。
+  const singleQuoteMatch = card.facts.some(f =>
+    f?.source?.quote_match && (f.source.quote_coverage || 0) >= 0.75
+  );
 
   const minDomains = isAncient ? 1 : 2;
-  if (domains.size < minDomains && !singleAuthoritativeRich) {
+  if (domains.size < minDomains && !singleAuthoritativeRich && !singleQuoteMatch) {
     reasons.push(`仅${domains.size}个独立来源域名（需≥${minDomains}）`);
   }
 

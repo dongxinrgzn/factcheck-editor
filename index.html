@@ -594,6 +594,17 @@ body {
       (data.confidenceReason ? '<div style="font-size:12px;color:#888;margin-top:6px;">' + escapeHtml(data.confidenceReason) + '</div>' : '') +
       '</div>';
 
+    // 整段原文直配横幅：这段文字在某个可引用页面上逐字重现 → 整段按"高"采信
+    //（后端 check.js 的"整段优先"链路；命中即不再逐点评级）
+    if (data.wholeMatch && data.wholeMatch.hit) {
+      var wm = data.wholeMatch;
+      html += '<div class="report-section" style="background:#f0f7ff;border:1px solid #cfe3ff;border-radius:8px;">' +
+        '<div style="font-weight:600;color:#1565c0;">整段原文命中出处，已按整段采信（原文覆盖率 ' + Math.round((wm.coverage || 0) * 100) + '%）</div>' +
+        '<div style="font-size:12px;color:#555;margin-top:6px;">' + escapeHtml(wm.title || wm.domain || '') +
+        (wm.url ? ' <a href="' + escapeHtml(wm.url) + '" target="_blank" class="ref-link">查看原文 ↗</a>' : '') +
+        '</div></div>';
+    }
+
     if (data.ratings && data.ratings.length > 0) {
       var kbTotal = data.ratings.filter(function(r) { return r.fromKB; }).length;
       html += '<div class="report-section" style="font-size:15px;font-weight:600;">逐点核查（共 ' +
@@ -604,7 +615,9 @@ body {
         var kbBadge = r.fromKB
           ? '<span class="tag-official" style="background:#2e7d32;color:#fff;margin-left:6px;">知识库' +
             (r.kbInfo && r.kbInfo.auditLabel ? '·' + escapeHtml(r.kbInfo.auditLabel) : '') + '</span>'
-          : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>';
+          : (r.wholeMatch
+              ? '<span class="tag-official" style="background:#1565c0;color:#fff;margin-left:6px;">整段原文直配</span>'
+              : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>');
         var html2 = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
           '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +
@@ -693,7 +706,9 @@ body {
         var kbBadge = r.fromKB
           ? '<span class="tag-official" style="background:#2e7d32;color:#fff;margin-left:6px;">知识库' +
             (r.kbInfo && r.kbInfo.auditLabel ? '·' + escapeHtml(r.kbInfo.auditLabel) : '') + '</span>'
-          : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>';
+          : (r.wholeMatch
+              ? '<span class="tag-official" style="background:#1565c0;color:#fff;margin-left:6px;">整段原文直配</span>'
+              : '<span style="font-size:11px;color:#999;margin-left:6px;">全网检索</span>');
         var item = '<div class="report-section"' + (r.fromKB ? ' style="background:#f4faf4;border-left:3px solid #4caf50;padding-left:10px;"' : '') + '>' +
           '<span class="rating-badge ' + c + '">' + escapeHtml(r.rating) + '</span>' + kbBadge +
           '<div style="margin-top:8px;"><strong>' + (idx + 1) + '. 断言：</strong>' + escapeHtml((r.claim && r.claim.claim) || '') + '</div>' +

@@ -177,10 +177,90 @@ export function isAttrNoun(metric) {
   return false;
 }
 
+// 繁→简常用字映射（相关性比对与事实挑句共用；此前只在 sources/brave.js 有一份，
+// 而 contentBigrams/-bigramOverlap 不做归一 → 简体断言对不上繁体证据句
+// "可燃氣體…空氣…速度"，重合度被低估后挑句/放行判据全部失真）。
+export const TRAD2SIMP = {
+  '貓': '猫', '體': '体', '長': '长', '壽': '寿', '齡': '龄', '積': '积', '產': '产',
+  '萬': '万', '億': '亿', '隻': '只', '國': '国', '學': '学', '東': '东', '業': '业',
+  '發': '发', '標': '标', '準': '准', '種': '种', '頭': '头', '條': '条',
+  '龍': '龙', '鳥': '鸟', '魚': '鱼', '馬': '马', '蟲': '虫', '貝': '贝', '見': '见',
+  '裡': '里', '裏': '里', '於': '于', '與': '与', '為': '为', '這': '这', '個': '个',
+  '們': '们', '來': '来', '說': '说', '話': '话', '語': '语', '詞': '词', '讀': '读',
+  '寫': '写', '書': '书', '網': '网', '頁': '页', '內': '内', '兩': '两', '從': '从',
+  '會': '会', '動': '动', '節': '节', '總': '总', '結': '结', '統': '统', '計': '计',
+  '價': '价', '貴': '贵', '點': '点', '數': '数', '據': '据', '樣': '样', '類': '类',
+  '開': '开', '關': '关', '門': '门', '問': '问', '題': '题', '實': '实', '際': '际',
+  '間': '间', '時': '时', '現': '现', '對': '对', '應': '应', '該': '该', '銀': '银',
+  '銅': '铜', '鐵': '铁', '錫': '锡', '鉛': '铅', '鋅': '锌', '鋁': '铝', '鈉': '钠',
+  '鈣': '钙', '鉀': '钾', '鎂': '镁', '風': '风', '雲': '云', '區': '区', '醫': '医',
+  '藥': '药', '經': '经', '濟': '济', '財': '财', '貿': '贸', '轉': '转', '運': '运',
+  '輪': '轮', '戶': '户', '燈': '灯', '號': '号', '稱': '称', '則': '则', '額': '额',
+  '豐': '丰', '層': '层', '島': '岛', '灣': '湾', '臺': '台', '華': '华',
+  // 化学/物理/教育类高频繁体字（港台维基与教育页）——
+  // 缺字会直接让"逐字收录的繁体页面"算不出覆盖率，整段直配失效（实测）。
+  '氣': '气', '霧': '雾', '劇': '剧', '製': '制', '鳴': '鸣', '聲': '声', '並': '并',
+  '燒': '烧', '煙': '烟', '證': '证', '論': '论', '討': '讨', '溫': '温', '熱': '热',
+  '質': '质', '變': '变', '級': '级', '練': '练', '習': '习', '驗': '验', '鏡': '镜',
+  '觀': '观', '當': '当', '還': '还', '進': '进', '嗎': '吗', '麼': '么', '衝': '冲',
+  '轟': '轰', '揚': '扬', '揮': '挥', '組': '组', '織': '织', '顯': '显', '圖': '图',
+  '飛': '飞', '機': '机', '電': '电', '線': '线', '導': '导', '極': '极', '陰': '阴',
+  '陽': '阳', '氫': '氢', '矽': '硅', '鈾': '铀', '屬': '属', '濕': '湿', '潔': '洁',
+  '淨': '净', '濾': '滤', '餾': '馏', '鎔': '熔', '鋼': '钢', '鈦': '钛', '鉻': '铬',
+  '錳': '锰', '鈷': '钴', '鎳': '镍', '釩': '钒', '鹼': '碱', '鹽': '盐',
+  '濃': '浓', '純': '纯', '養': '养', '構': '构', '壓': '压',
+};
+const TRAD2SIMP_RE = new RegExp('[' + Object.keys(TRAD2SIMP).join('') + ']', 'g');
+/** 繁→简归一（幂等；仅覆盖常用字，专用于相关性/挑句比对，不做全文转换） */
+export function normZh(s) {
+  return String(s || '').replace(TRAD2SIMP_RE, c => TRAD2SIMP[c] || c);
+}
+
+/**
+ * 文本 → 内容二元组集合（剔掉含虚字的二元组）。
+ * "的了是在"这类公共串会让任意两段文本都算"相关"，必须剔除后再比重叠度。
+ * 唯一实现放在这里（utils），brave.js 的相关性兜底与 pickFactSentence 共用。
+ * 输入先做繁→简归一：简体断言要能对上繁体证据句（氫氣→氢气、空氣→空气）。
+ */
+const FUNC_CHAR = new Set('的了是在有和与及这那它他她我你您们个中于对从把被而且并或则也就都还只不没很将会能可要上下内外前后同时以之类其此等并'.split(''));
+export function contentBigrams(text) {
+  const s = normZh(text).replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '');
+  const out = [];
+  for (let i = 0; i < s.length - 1; i++) {
+    const bg = s.slice(i, i + 2);
+    if (!/[\u4e00-\u9fa5]{2}/.test(bg)) continue;
+    if (FUNC_CHAR.has(bg[0]) || FUNC_CHAR.has(bg[1])) continue;
+    if (!out.includes(bg)) out.push(bg);
+  }
+  return out;
+}
+/** 两段文本的内容二元组重叠数（用于"这两段话是否在讲同一件事"的廉价判据） */
+export function bigramOverlap(a, b) {
+  const bb = new Set(contentBigrams(b));
+  let n = 0;
+  for (const g of contentBigrams(a)) if (bb.has(g)) n++;
+  return n;
+}
+
+/**
+ * 整段原文覆盖率：passage 的内容二元组有多大比例出现在 text 里（繁简归一后比对）。
+ * 用途：教材/课本原文、成段引文常被"答案/教育"站整段收录——覆盖率 ≥0.55 且
+ * 重合二元组 ≥10 时，可认定"这段文字有可引用出处"（整段采信，见 check.js）。
+ * 摘要常被截断，所以判据用"整段有多少落在摘要里"，而不是反过来。
+ */
+export function quoteCoverage(passage, text) {
+  const pg = contentBigrams(passage);
+  if (pg.length === 0) return { coverage: 0, overlap: 0, total: 0 };
+  const tb = new Set(contentBigrams(text));
+  let hit = 0;
+  for (const g of pg) if (tb.has(g)) hit++;
+  return { coverage: hit / pg.length, overlap: hit, total: pg.length };
+}
+
 /**
  * 从证据原文里挑出**最相关的一句**，作为知识库事实的 value。
  * 必须是证据原文（片段），不能是"属实：/纠错："这类核查结论。
- * 优先级：属性词+数值单位 > 数值单位 > 属性词 > 首句。
+ * 优先级：属性词+数值单位 > 数值单位 > 属性词 > 断言关联句 > 首句。
  * 返回空串表示证据为空（调用方据此放弃该条）。
  *
  * opts.strict：只在"挑出的句子确实与属性相关"（含属性词或含数值单位）时才返回，
@@ -199,11 +279,35 @@ export function pickFactSentence(text, opts = {}) {
   const list = parts.length ? parts : [raw];
   const withData = (s) => dataRe.test(s);
   const withMetric = (s) => metricWords.length > 0 && metricWords.some(w => s.includes(w));
-  const pick =
+  // 锚点=断言原文。给了锚点时，"只含数据单位"的句子必须与断言沾边（≥2 个实词
+  // 二元组重合）才能胜出——否则任何带数字的句子都会被当成事实入库（实测：爆轰
+  // 论文里的"混合氣…爆轟…速度高達100m/sec"被存成"普里斯特利 速度"）。
+  // 属性词+数据双命中的句子免锚点：属性词本身就是相关性信号，不能再卡一遍
+  // （"体重"这种两字属性在句里只贡献 1 个二元组，卡 ≥2 会误杀真正的数据句）。
+  const anchor = String(opts.anchor || '').trim();
+  const anchorHit = (s) => anchor ? bigramOverlap(anchor, s) >= 2 : true;
+  let pick =
     list.find(s => withMetric(s) && withData(s)) ||
-    list.find(withData) ||
-    list.find(withMetric) ||
-    list[0];
+    list.find(s => withData(s) && anchorHit(s)) ||
+    list.find(s => withMetric(s) && anchorHit(s)) ||
+    null;
+  // 无属性词、也无数据句（历史叙事类断言的常态）→ 按"与断言的关联度"挑句。
+  // 证据常是整段文章，退回首句会把段落铺垫当事实存进库（实测教材题的
+  // "起初，人们认为水是一种元素…" 被当成"普里斯特利"的事实），之后 KB 命中
+  // 就答非所问。anchor=断言原文，取内容二元组重叠最多（≥2）的一句。
+  if (!pick && anchor) {
+    let best = null;
+    let bestN = 1; // 至少 2 个不同的实词二元组重合才算"在讲同一句"
+    for (const s of list) {
+      const n = bigramOverlap(anchor, s);
+      if (n > bestN) { bestN = n; best = s; }
+    }
+    pick = best;
+  }
+  // requireAnchor：宁可不出事实，也不拿跟断言不沾边的句子凑数
+  //（整段采信链路用：证据页与断言重叠不足时，这条断言就不生成事实）
+  if (!pick && opts.requireAnchor) return '';
+  if (!pick) pick = list[0];
   if (opts.strict && !withMetric(pick) && !withData(pick)) return '';
   return String(pick || '').slice(0, 300).trim();
 }
@@ -253,7 +357,7 @@ export function storeFactsOf(o = {}) {
   // 查证链路：只有证据全文，需要从中挑出最相关的一句。
   // 两条链路都只用**原文片段**，绝不使用模型生成的结论性文字。
   const value = explicit || (evidence
-    ? pickFactSentence(evidence, { metric: o.metric, isEn: o.isEn, strict: !!o.strict })
+    ? pickFactSentence(evidence, { metric: o.metric, isEn: o.isEn, strict: !!o.strict, anchor: o.anchor })
     : '');
   if (!value) return [];
   const src = o.source || {};
@@ -269,6 +373,10 @@ export function storeFactsOf(o = {}) {
     url: src.url || '',
     official_tag: !!src.official_tag,
     official_score: src.official_score != null ? src.official_score : (src.official_tag ? 0.9 : 0.5),
+    // 整段原文直配标记：入库门槛①（官方/百科）之外的第二种权威依据，
+    // 由 check.js 的整段采信链路写入（覆盖率达标才置位）。
+    quote_match: !!src.quote_match,
+    quote_coverage: typeof src.quote_coverage === 'number' ? src.quote_coverage : 0,
   };
 
   const seen = new Set();
@@ -307,19 +415,28 @@ export function storeFactOf(o = {}) {
 }
 
 /**
- * 从一条断言的**检索结果**里挑出最优来源（官方性最高的一条，且必须是可引用的真实页面）。
- * @returns {object|null} {name,url,official_tag,official_score}
+ * 从一条断言的**检索结果**里挑出最优来源（原文直配 > 官方性最高，且必须是可引用的真实页面）。
+ * quote_match=true 的是"整段原文命中页"（见 check.js 整段采信链路）：它证明这段文字
+ * 有可引用出处，入库门槛①认它，所以优先选它。
+ * @returns {object|null} {name,url,official_tag,official_score,quote_match,quote_coverage}
  */
 export function bestCitableSource(results) {
   const list = (Array.isArray(results) ? results : [])
     .filter(r => r && r.url && isCitableSource(r));
   if (list.length === 0) return null;
-  const sorted = list.slice().sort((a, b) => (b.official_score || 0) - (a.official_score || 0));
+  const sorted = list.slice().sort((a, b) => {
+    const qa = a.quote_match ? 1 : 0;
+    const qb = b.quote_match ? 1 : 0;
+    if (qa !== qb) return qb - qa;
+    return (b.official_score || 0) - (a.official_score || 0);
+  });
   const top = sorted[0];
   return {
     name: top.title || top.site_name || '',
     url: top.url,
     official_tag: !!top.official_tag,
     official_score: top.official_score != null ? top.official_score : (top.official_tag ? 0.9 : 0.5),
+    quote_match: !!top.quote_match,
+    quote_coverage: typeof top.quote_coverage === 'number' ? top.quote_coverage : 0,
   };
 }

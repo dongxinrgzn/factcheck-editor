@@ -581,29 +581,33 @@ export async function searxSearch(query, topK = 5) {
 }
 
 // ---------- Tavily 正规搜索 API（对云服务器友好，返回网页正文） ----------
-/**
- * @param {string} query
- * @param {Object} opts - { apiKey, topK, includeDomains:[], searchDepth }
- * @returns {{results: Array, answer: string}}
- */
-export async function tavilySearch(query, opts = {}) {
-  const { apiKey, topK = 8, includeDomains = null, searchDepth = 'advanced' } = opts;
-  if (!apiKey || !query) return { results: [], answer: '' };
+// Key 侧"服务不了"的状态码：额度用尽(432) / PAYG 用尽(433) / 限流(429) / 鉴权失败(401、403)。
+// 命中这些就改用 keyless 模式重试；参数类错误（400 等）不降级——keyless 一样会失败。
+const TAVILY_KEY_DOWN = new Set([401, 403, 429, 432, 433]);
+
+// Tavily 单次请求。auth 为空时走 keyless（不带 Authorization）。
+async function tavilyFetchOnce(payload, auth, timeoutMs = 20000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const payload = { query, search_depth: searchDepth, include_answer: true, max_results: topK };
-    if (includeDomains && includeDomains.length) payload.include_domains = includeDomains;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 20000);
+    const headers = { 'Content-Type': 'application/json' };
+    if (auth) {
+      headers['Authorization'] = `Bearer ${auth}`;
+    } else {
+      // ⚠️ keyless 必须**只**带这个头：官网明确「同时给 Key 与 keyless 头时 Key 优先」，
+      // 带着已超额的 Key 发 keyless 请求仍按账户额度计费 → 依旧 432。
+      headers['X-Tavily-Access-Mode'] = 'keyless';
+    }
     const resp = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       signal: ctrl.signal,
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      headers,
       body: JSON.stringify(payload),
     });
-    clearTimeout(t);
-    if (!resp.ok) return { results: [], answer: '' };
+    const status = resp.status;
+    if (!resp.ok) return { ok: false, status, results: [], answer: '' };
     const j = await resp.json().catch(() => null);
-    if (!j || !Array.isArray(j.results)) return { results: [], answer: '' };
+    if (!j || !Array.isArray(j.results)) return { ok: false, status, results: [], answer: '' };
     const results = j.results
       .filter(r => r && r.url)
       .map(r => ({
@@ -612,10 +616,49 @@ export async function tavilySearch(query, opts = {}) {
         snippet: r.content || '',
         source: 'tavily',
       }));
-    return { results, answer: j.answer || '' };
+    return { ok: true, status, results, answer: j.answer || '' };
   } catch {
-    return { results: [], answer: '' };
+    return { ok: false, status: 0, results: [], answer: '' };
+  } finally {
+    clearTimeout(t);
   }
+}
+
+/**
+ * Tavily 检索，**Key 额度用尽时自动降级 keyless**。
+ *
+ * @param {string} query
+ * @param {Object} opts - { apiKey, topK, includeDomains:[], searchDepth }
+ * @returns {{results: Array, answer: string, mode: 'key'|'keyless'|'none'}}
+ *
+ * 为什么必须降级：免费档只有 1000 credits/月（basic=1、advanced=2 credit，每月 1 日重置）。
+ * 用尽后带 Key 请求返回 432（Plan Limit Exceeded）。旧代码 `if (!resp.ok) return 空`
+ * 把它**静默吞掉**，主链路只剩维基返回的无关词条（实测某断言因此由"高"跌到"低"、
+ * evidence 为空）——故障不可见比报错更糟。
+ *
+ * Tavily 另有 keyless 模式（无需账号/Key），返回 schema 与带 Key **完全一致**，
+ * 且额度池**独立于账户 credits**。实测 200 + 真实结果，advanced 深度亦可用。
+ * 所以：无 Key、或 Key 侧不可用（见 TAVILY_KEY_DOWN）→ 自动改走 keyless。
+ *
+ * mode 随结果返回，便于上游/探针把"已降级"这件事暴露出来，而不是继续静默。
+ */
+export async function tavilySearch(query, opts = {}) {
+  const { apiKey, topK = 8, includeDomains = null, searchDepth = 'advanced' } = opts;
+  if (!query) return { results: [], answer: '', mode: 'none' };
+
+  const payload = { query, search_depth: searchDepth, include_answer: true, max_results: topK };
+  if (includeDomains && includeDomains.length) payload.include_domains = includeDomains;
+
+  if (apiKey) {
+    const r = await tavilyFetchOnce(payload, apiKey);
+    if (r.ok) return { results: r.results, answer: r.answer, mode: 'key' };
+    // 参数/服务端错误：keyless 同样会失败，不必多打一次
+    if (!TAVILY_KEY_DOWN.has(r.status)) return { results: [], answer: '', mode: 'key', status: r.status };
+  }
+
+  const r2 = await tavilyFetchOnce(payload, null);
+  if (r2.ok) return { results: r2.results, answer: r2.answer, mode: 'keyless' };
+  return { results: [], answer: '', mode: 'keyless', status: r2.status };
 }
 
 // ---------- SearXNG site: 官方域名检索（聚合多实例，JSON 稳定，官方主通道） ----------
@@ -713,19 +756,26 @@ function hostOf(r) {
  * 留在链路里只会污染证据集并白耗子请求。
  * ddgSearch/searxSearch 函数仍保留——govDirect 兜底通道与健康探针在用。
  *
- * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey, diversify }
+ * @param {Object} opts - { query, preferOfficial, topK, whitelist, hint, tavilyApiKey, diversify, tavilyDepth, alwaysTavily }
  *   hint: 核查的属性维度（如"体重""体长"），用于从词条正文中定向提取数据句
+ *   alwaysTavily: 即使维基有结果也不短路、照查 Tavily（整段原文检索必须置 true）
  */
 export async function braveSearch(opts = {}) {
   // tavilyDepth：Tavily 检索深度（basic=1 信用 / advanced=2 信用）。
   // 查证链路传 'advanced'——教材原句这类长句检索，advanced 对自然语言的理解
   // 明显更好（实测同一句子 basic 召回人物传记，advanced 能直接召回原题页）。
-  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true, tavilyDepth = 'basic' } = opts;
+  // alwaysTavily：即使维基有结果也照样查 Tavily（见下方注释）
+  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true, tavilyDepth = 'basic', alwaysTavily = false } = opts;
   if (!query) return [];
 
   // 1. 维基（权威来源 + 深度抽取属性数据句）
   const wiki = await wikiSearch(query, topK, hint);
-  if (wiki.length > 0) {
+  // 「维基有结果就短路」对**整段原文检索**是有害的：教材原页不在维基上，而维基对长句
+  // 匹配不上时会返回模糊噪音（实测整段检索返回《盐酸》《锑》《钛》《钽》）。噪音被当成
+  // "命中"，Tavily 这个真正能召到原页的引擎就彻底没被调用 → 整段直配永远不中。
+  // 故整段检索传 alwaysTavily: true，跳过短路、以 Tavily 为主。
+  const wikiShortcut = wiki.length > 0 && !alwaysTavily;
+  if (wikiShortcut) {
     let merged = dedupe([...wiki]);
     // 域名多样性兜底：维基结果常清一色 zh.wikipedia.org，而自动入库门槛要求
     // 「≥2 个独立域名」，单一域名会让高可信事实永远过不了审。域名单一时
@@ -734,13 +784,23 @@ export async function braveSearch(opts = {}) {
     return merged.slice(0, topK);
   }
 
-  // 2. 维基无结果 → Tavily（付费兜底）
+  // 2. Tavily 主检索（维基无结果；或 alwaysTavily 下即使维基有结果也照查）
   if (tavilyApiKey) {
     try {
       const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: tavilyDepth });
-      if (tavily.results && tavily.results.length > 0) return tavily.results.slice(0, topK);
+      const tv = (tavily.results || []).filter(r => r && r.url);
+      if (tv.length > 0) {
+        if (wiki.length > 0) {
+          // alwaysTavily 且维基也有结果：维基排前（权威性），Tavily 追加去重
+          const seen = new Set(wiki.map(r => r.url));
+          return dedupe([...wiki, ...tv.filter(r => !seen.has(r.url))]).slice(0, topK);
+        }
+        return tv.slice(0, topK);
+      }
     } catch {}
   }
+  // 3. Tavily 也没结果（或无 Key 且 keyless 也不通）→ 退回维基
+  if (wiki.length > 0) return dedupe([...wiki]).slice(0, topK);
   return [];
 }
 

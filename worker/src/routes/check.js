@@ -1034,6 +1034,9 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       } catch { /* 缓存不可用时照常检索 */ }
       try {
         if (!merged) {
+          // alwaysTavily：整段检索必须查 Tavily。教材原页不在维基上，而维基对长句
+          // 匹配不上时会返回模糊噪音（实测返回《盐酸》《锑》《钛》）——若允许"维基命中
+          // 就短路"，噪音会把 Tavily 挡在门外，整段直配就永远不会命中。
           const lists = await Promise.all(variants.map(q => braveSearch({
             query: q,
             preferOfficial: false,
@@ -1041,6 +1044,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             tavilyApiKey: env.TAVILY_KEY,
             diversify: true,
             tavilyDepth: 'advanced',
+            alwaysTavily: true,
           }).catch(() => [])));
           const acc = [];
           const seenUrl = new Set();

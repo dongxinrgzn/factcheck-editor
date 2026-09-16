@@ -35,6 +35,8 @@ export async function handleHealth(request, env) {
         const r = await fn();
         const list = Array.isArray(r) ? r : (r?.results || []);
         probe[name] = { ok: list.length > 0, results: list.length, ms: Date.now() - t0 };
+        // Tavily 会返回 mode（'key' | 'keyless'）：看到 keyless 即说明 Key 额度已用尽、走了降级
+        if (r && typeof r.mode === 'string') probe[name].mode = r.mode;
         if (q) samples[name] = list.slice(0, 5).map(x => `${x.title || ''} <${x.source || ''}>`);
       } catch (e) {
         probe[name] = { ok: false, error: String(e.message || e).slice(0, 120), ms: Date.now() - t0 };
@@ -78,6 +80,13 @@ export async function handleHealth(request, env) {
             body: JSON.stringify({ query: qWeb, max_results: 1, search_depth: 'basic' }),
           })
         : Promise.resolve(probe['tavily-raw'] = { ok: false, error: 'TAVILY_KEY 未配置' }),
+      // Tavily keyless（无需 Key，额度池**独立于账户 credits**）——现在是主链路的兜底通道。
+      // 判读：若 tavily-raw 是 432（额度用尽）而这条仍是 200，说明自动降级在正常工作。
+      rawProbe('tavily-keyless', 'https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Tavily-Access-Mode': 'keyless' },
+        body: JSON.stringify({ query: qWeb, max_results: 1, search_depth: 'basic' }),
+      }),
       // Jina Search（免 Key 可用；新 key 另送 10M token）
       rawProbe('jina-search', `https://s.jina.ai/${enc}`, { headers: { Accept: 'text/plain' } }),
       // Jina Reader：URL → Markdown（免 Key），用于"拿到 URL 后抓正文"的便宜替代
@@ -109,8 +118,8 @@ export async function handleHealth(request, env) {
     ]);
     data.probe = probe;
     data.sources = ['wikipedia', 'tavily']; // Bing（2026-09-16 弃用）、DDG/SearXNG（反爬失效）已移出主链路
-    data.fallback_candidates = ['jina(免Key)', 'serper(2500次)', 'exa(1000/月)', 'brave($5/月)', 'baike-direct(免Key)'];
-    data.tavily_free_tier = '1000 credits/月（basic=1、advanced=2 credit/次）';
+    data.fallback_candidates = ['tavily-keyless(免Key，已接入主链路兜底)', 'serper(2500次)', 'exa(1000/月)', 'brave($5/月)', 'jina(已需鉴权)'];
+    data.tavily_free_tier = '1000 credits/月（basic=1、advanced=2 credit/次，每月 1 日重置）；超额返回 432 → 自动降级 keyless（免 Key，独立额度池）';
     if (q) data.samples = samples;
   }
 

@@ -585,6 +585,16 @@ export async function searxSearch(query, topK = 5) {
 // 命中这些就改用 keyless 模式重试；参数类错误（400 等）不降级——keyless 一样会失败。
 const TAVILY_KEY_DOWN = new Set([401, 403, 429, 432, 433]);
 
+// keyless 也是**限量**的，但配额粒度与 Key 侧完全不同：Key 侧是"每月 1000 credits"，
+// keyless 是**按出口 IP 的每小时额度**。实测（2026-09-16）超额返回 429、
+// body.error.code = "hourly_cap_reached"、带 `Retry-After` 头（本次约 90 秒）；
+// 且**同一时刻我本机 IP 被限、Cloudflare Worker 边缘仍是 200** → 额度按出口 IP 计、
+// 不是全局共享，Worker 天然有更多余量；窗口滑过即自动恢复，无需人工介入。
+// 这里记一个"keyless 解除时间"：撞限后在到期前不再打 keyless，免得每条断言都白打
+// 一次 429（徒增延迟与子请求）。isolate 复用时有效；isolate 回收后最坏多探一次再学到。
+let keylessCapUntil = 0;
+export function getKeylessCapUntil() { return keylessCapUntil; }
+
 // Tavily 单次请求。auth 为空时走 keyless（不带 Authorization）。
 async function tavilyFetchOnce(payload, auth, timeoutMs = 20000) {
   const ctrl = new AbortController();
@@ -605,7 +615,14 @@ async function tavilyFetchOnce(payload, auth, timeoutMs = 20000) {
       body: JSON.stringify(payload),
     });
     const status = resp.status;
-    if (!resp.ok) return { ok: false, status, results: [], answer: '' };
+    if (!resp.ok) {
+      // 失败要把**为什么**带回去：429 时读 Retry-After 与 error.code，
+      // 才能区分"keyless 小时额度撞限（等窗口滑过自愈）"与其它限流
+      const retryAfter = parseInt(resp.headers.get('Retry-After') || '0', 10) || 0;
+      let errorCode = '';
+      try { errorCode = JSON.parse(await resp.text())?.error?.code || ''; } catch { /* 非 JSON 响应 */ }
+      return { ok: false, status, errorCode, retryAfter, results: [], answer: '' };
+    }
     const j = await resp.json().catch(() => null);
     if (!j || !Array.isArray(j.results)) return { ok: false, status, results: [], answer: '' };
     const results = j.results
@@ -625,22 +642,24 @@ async function tavilyFetchOnce(payload, auth, timeoutMs = 20000) {
 }
 
 /**
- * Tavily 检索，**Key 额度用尽时自动降级 keyless**。
+ * Tavily 检索，两级免费额度自动兜底：**Key 额度用尽 → 降级 keyless**。
  *
  * @param {string} query
  * @param {Object} opts - { apiKey, topK, includeDomains:[], searchDepth }
- * @returns {{results: Array, answer: string, mode: 'key'|'keyless'|'none'}}
+ * @returns {{results: Array, answer: string, mode: 'key'|'keyless'|'none',
+ *            status?: number, capped?: boolean, capUntil?: string}}
  *
- * 为什么必须降级：免费档只有 1000 credits/月（basic=1、advanced=2 credit，每月 1 日重置）。
- * 用尽后带 Key 请求返回 432（Plan Limit Exceeded）。旧代码 `if (!resp.ok) return 空`
- * 把它**静默吞掉**，主链路只剩维基返回的无关词条（实测某断言因此由"高"跌到"低"、
- * evidence 为空）——故障不可见比报错更糟。
+ * 两级额度的形状**完全不同**，必须分开对待：
+ *  ① Key 侧：1000 credits/月（basic=1、advanced=2），每月 1 日重置；用尽返回 **432**。
+ *  ② keyless 侧（无需账号）：**按出口 IP 的每小时额度**；撞限返回 **429** +
+ *     `error.code = "hourly_cap_reached"` + `Retry-After`（实测约 90s，窗口滑过自愈）。
+ *     两池互相独立，所以 ① 耗尽后 ② 仍然可用（这正是降级能救场的原因）。
  *
- * Tavily 另有 keyless 模式（无需账号/Key），返回 schema 与带 Key **完全一致**，
- * 且额度池**独立于账户 credits**。实测 200 + 真实结果，advanced 深度亦可用。
- * 所以：无 Key、或 Key 侧不可用（见 TAVILY_KEY_DOWN）→ 自动改走 keyless。
+ * 旧代码 `if (!resp.ok) return 空` 把 432 静默吞掉，主链路只剩维基返回的无关词条
+ * （实测某断言因此由"高"跌到"低"、evidence 为空）——故障不可见比报错更糟。
  *
- * mode 随结果返回，便于上游/探针把"已降级"这件事暴露出来，而不是继续静默。
+ * mode 随结果返回，便于上游/探针把"已降级"暴露出来，而不是继续静默。
+ * 降级请求**必须去掉 Authorization**：官网明确「同时给 Key 与 keyless 头时 Key 优先」。
  */
 export async function tavilySearch(query, opts = {}) {
   const { apiKey, topK = 8, includeDomains = null, searchDepth = 'advanced' } = opts;
@@ -656,9 +675,25 @@ export async function tavilySearch(query, opts = {}) {
     if (!TAVILY_KEY_DOWN.has(r.status)) return { results: [], answer: '', mode: 'key', status: r.status };
   }
 
+  // 已知 keyless 撞限且未到解除时间 → 直接跳过，交给上游其它来源兜底（更快，也不白占子请求）
+  if (Date.now() < keylessCapUntil) {
+    return { results: [], answer: '', mode: 'keyless', status: 429, capped: true,
+             capUntil: new Date(keylessCapUntil).toISOString() };
+  }
+
   const r2 = await tavilyFetchOnce(payload, null);
-  if (r2.ok) return { results: r2.results, answer: r2.answer, mode: 'keyless' };
-  return { results: [], answer: '', mode: 'keyless', status: r2.status };
+  if (r2.ok) {
+    keylessCapUntil = 0; // 通了说明窗口已滑过、额度已恢复
+    return { results: r2.results, answer: r2.answer, mode: 'keyless' };
+  }
+  // keyless 也撞限 → 记下解除时间（取 Retry-After，限幅 10s~1h，防异常值把通道长期关死）
+  if (r2.status === 429 || r2.errorCode === 'hourly_cap_reached') {
+    const wait = Math.min(Math.max(r2.retryAfter || 60, 10), 3600);
+    keylessCapUntil = Date.now() + wait * 1000;
+  }
+  return { results: [], answer: '', mode: 'keyless', status: r2.status,
+           capped: keylessCapUntil > Date.now(),
+           capUntil: keylessCapUntil ? new Date(keylessCapUntil).toISOString() : '' };
 }
 
 // ---------- SearXNG site: 官方域名检索（聚合多实例，JSON 稳定，官方主通道） ----------

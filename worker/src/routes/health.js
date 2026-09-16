@@ -2,7 +2,7 @@
 // ?probe=1 时对各检索源做一次真实连通性自测（诊断"搜索结果变少"类问题）
 
 import { jsonResponse } from '../utils/cors.js';
-import { wikiSearch, ddgSearch, searxSearch, tavilySearch } from '../sources/brave.js';
+import { wikiSearch, ddgSearch, searxSearch, tavilySearch, getKeylessCapUntil } from '../sources/brave.js';
 
 export async function handleHealth(request, env) {
   const kvStatus = {};
@@ -119,7 +119,11 @@ export async function handleHealth(request, env) {
     data.probe = probe;
     data.sources = ['wikipedia', 'tavily']; // Bing（2026-09-16 弃用）、DDG/SearXNG（反爬失效）已移出主链路
     data.fallback_candidates = ['tavily-keyless(免Key，已接入主链路兜底)', 'serper(2500次)', 'exa(1000/月)', 'brave($5/月)', 'jina(已需鉴权)'];
-    data.tavily_free_tier = '1000 credits/月（basic=1、advanced=2 credit/次，每月 1 日重置）；超额返回 432 → 自动降级 keyless（免 Key，独立额度池）';
+    data.tavily_free_tier = 'Key 侧 1000 credits/月（basic=1、advanced=2 credit/次，每月 1 日重置）超额返回 432；keyless 侧按出口 IP 计**每小时**额度，撞限返回 429 + hourly_cap_reached + Retry-After（实测约 90s），窗口滑过自愈。两级额度独立 → 自动降级';
+    // 本 isolate 记录的 keyless 解除时间（撞限后到点前不再打 keyless，避免每条断言白打一次 429）
+    const capUntil = getKeylessCapUntil();
+    data.tavily_keyless_capped = capUntil > Date.now();
+    data.tavily_keyless_cap_until = capUntil ? new Date(capUntil).toISOString() : '';
     if (q) data.samples = samples;
   }
 

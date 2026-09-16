@@ -11,7 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
 import { buildDraftCard, buildStoreCardsByEntity } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource, quoteCoverage, pickFactSentence } from '../utils/attrClassify.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource, quoteCoverage, pickFactSentence, bigramOverlap } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -167,6 +167,21 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     const card = hit.card;
     const facts = Array.isArray(card.facts) ? card.facts : [];
     if (facts.length === 0) continue;
+
+    // ⚠️ 词条主体必须与断言主体一致，否则放弃这次命中（继续试下一个 probe；
+    // 全都对不上 → 视为未命中，走全网检索）。
+    // 反例（实测）：断言"普里斯特利用锌加入稀硫酸中制得可燃空气"的实体是"普里斯特利"，
+    // 但断言文本里含"可燃空气" → 模糊匹配命中了《可燃空气》词条；这个命中又**挡住了
+    // 全网检索**（KB 优先），而词条证据在按实体过相关性闸门时被剔除 → 该条只能判
+    // "查无实据"，其实网上有充分证据。判据：词条名/别名与实体互含，或二元组重合 ≥2
+    //（"约瑟夫·普里斯特利" ↔ "普里斯特利" 覆盖 4 个二元组）。
+    if (entity) {
+      const names = [card.title, ...(Array.isArray(card.aliases) ? card.aliases : [])]
+        .map(x => String(x || '').trim()).filter(Boolean);
+      const sameEntity = names.some(n => n === entity || n.includes(entity) || entity.includes(n))
+        || names.some(n => bigramOverlap(entity, n) >= 2);
+      if (!sameEntity) continue;
+    }
 
     // 从词条事实中挑与属性相关的**全部**事实：
     // ① label 与任一属性词互相包含（hint 可能是"身高 体重"多属性）→ ② label 与断言文本互相包含
@@ -1006,22 +1021,37 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     if (ptext.length >= 20 && ptext.length <= 400) {
       // 多形态整段检索：原文 + 去中文引号（引号会让部分检索引擎把整串当短语匹配，
       // 召回集明显变窄）。两种形态并行，结果合并去重。
+      // ⚠️ 必须走缓存：整段检索是每请求固定成本（2 形态 × advanced = 4 credits，
+      // 而免费额度只有 1000 credits/月）。同一段文字重复核查（多人核对同一份稿子）
+      // 是常态，命中缓存则 0 消耗；缓存只存"检索结果"，覆盖率判定每次重算。
       const bare = ptext.replace(/[“”"‘’]/g, '');
       const variants = Array.from(new Set([ptext, bare])).filter(s => s.length >= 20);
+      const wholeCacheK = searchCacheKey(`整段:${ptext}`);
+      let merged = null;
       try {
-        const lists = await Promise.all(variants.map(q => braveSearch({
-          query: q,
-          preferOfficial: false,
-          topK: 6,
-          tavilyApiKey: env.TAVILY_KEY,
-          diversify: true,
-          tavilyDepth: 'advanced',
-        }).catch(() => [])));
-        const merged = [];
-        const seenUrl = new Set();
-        for (const list of lists) {
-          for (const r of (Array.isArray(list) ? list : [])) {
-            if (r?.url && !seenUrl.has(r.url)) { seenUrl.add(r.url); merged.push(r); }
+        const cachedWhole = await cacheGet(env.FACT_CACHE, wholeCacheK);
+        if (Array.isArray(cachedWhole) && cachedWhole.length > 0) merged = cachedWhole;
+      } catch { /* 缓存不可用时照常检索 */ }
+      try {
+        if (!merged) {
+          const lists = await Promise.all(variants.map(q => braveSearch({
+            query: q,
+            preferOfficial: false,
+            topK: 6,
+            tavilyApiKey: env.TAVILY_KEY,
+            diversify: true,
+            tavilyDepth: 'advanced',
+          }).catch(() => [])));
+          const acc = [];
+          const seenUrl = new Set();
+          for (const list of lists) {
+            for (const r of (Array.isArray(list) ? list : [])) {
+              if (r?.url && !seenUrl.has(r.url)) { seenUrl.add(r.url); acc.push(r); }
+            }
+          }
+          merged = acc;
+          if (acc.length > 0) {
+            try { await cacheSet(env.FACT_CACHE, wholeCacheK, acc, SEARCH_TTL); } catch { /* 写不进也无妨 */ }
           }
         }
         const annot = annotateResults(merged, env);
@@ -1111,7 +1141,16 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       // 改写句只当检索词用：评级的对象始终是原断言，语义不会漂移。
       // 断言不含历史术语时抽取侧留空，此时照旧用 buildSearchQuery(整句/实体+关键词)。
       const sqHint = (typeof c.searchHint === 'string') ? c.searchHint.trim() : '';
-      const sq = sqHint.length >= 6 ? sqHint : buildSearchQuery(c);
+      // 改写句必须保留**专名主体**：实测某条断言的 hint 写成"锌与稀硫酸反应生成氢气"，
+      // 丢了人名"普里斯特利" → 维基只召回《硫酸》《酸》《锶》这类字面噪音，
+      // 评级环节便拿这些噪音编出"主体应为卡文迪什"的假纠错。
+      // 兜底：hint 里没有实体时把实体补在前面；但**历史术语/旧称不补**——
+      // 它们的现代名称已经在 hint 里，补回去反而召回爆轰/消防等同话题噪音。
+      const HIST_TERM = /^(可燃空气|易燃空气|可燃性空气|脱燃素空气|固定空气|燃素|活命空气)$/;
+      const sqHintFull = (sqHint && entity2 && !sqHint.includes(entity2) && !HIST_TERM.test(entity2))
+        ? `${entity2} ${sqHint}`
+        : sqHint;
+      const sq = sqHintFull.length >= 6 ? sqHintFull : buildSearchQuery(c);
 
       // ---- 知识库优先 ----
       const kb = await lookupKBForClaim(env, c, entity2);

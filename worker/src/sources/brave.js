@@ -746,13 +746,16 @@ export async function braveSearch(opts = {}) {
 
 /**
  * 强制全网搜索（跳过缓存，Tavily 优先）
- * 当 braveSearch 返回的结果不相关时使用
+ * 当 braveSearch 返回的结果不相关时使用。
+ * ⚠️ 深度用 basic（1 credit）：这是"主检索结果不可信"时的兜底通道，一次请求里
+ * 可能被多条断言各触发一次；原先用 advanced（2 credits）等于在兜底上翻倍烧额度
+ * （Tavily 免费只有 1000 credits/月）。兜底不需要最好召回，只需要"换个索引看一眼"。
  */
 export async function braveSearchForce(query, topK = 5, tavilyApiKey) {
   if (!query) return [];
   if (tavilyApiKey) {
     try {
-      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'advanced' });
+      const tavily = await tavilySearch(query, { apiKey: tavilyApiKey, topK, searchDepth: 'basic' });
       if (tavily.results && tavily.results.length > 0) return tavily.results.slice(0, topK);
     } catch {}
   }

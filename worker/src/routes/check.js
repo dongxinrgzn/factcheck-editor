@@ -387,13 +387,34 @@ const ATTR_SYNONYMS = {
 // 通用标签：标签不成词（如"相关数据"）的事实，允许按"值"匹配属性词
 const GENERIC_LABEL_RE = /^(相关数据|其他|数据|详情|信息|备注)?$/;
 
-/** 把属性近义词追加进检索词（最多 2 个，避免过长影响召回） */
+/** 把属性近义词追加进检索词（最多 2 个，避免过长影响召回）。
+ *  metric 可能含多个属性词（如"体重 身高"），但**只扩展第一个**：
+ *  主检索词本身已是多属性，再逐个堆叠近义词会让维基全文检索（词项交集）
+ *  直接零召回——实测"大熊猫 体重 身高 肩高 臀高 体高"召回 0 条。 */
 function expandQueryWithAttrSynonyms(query, metric) {
   const q = String(query || '').trim();
-  const m = String(metric || '').trim();
-  if (!q || !m) return q;
-  const syn = (ATTR_SYNONYMS[m] || []).filter(s => !q.includes(s)).slice(0, 2);
+  if (!q) return q;
+  const first = String(metric || '').split(/[\s、，,\/]+/).map(s => s.trim()).filter(Boolean)[0] || '';
+  if (!first) return q;
+  const syn = (ATTR_SYNONYMS[first] || []).filter(s => !q.includes(s)).slice(0, 2);
   return syn.length ? `${q} ${syn.join(' ')}` : q;
+}
+
+/**
+ * 收集查询里出现的**全部**属性词（含 hint 与原文各自出现、且可能不止一个）。
+ * 多属性查询（"大熊猫 体重 身高"）时 factCard 过滤、检索扩展都必须用并集，
+ * 否则只认第一个属性词，其它属性的数据句会被相关性过滤全部剔除——
+ * 表现为"直接解答有数据，但结构化数据卡为空"。
+ */
+function attrWordsOf(text, hint) {
+  const words = new Set();
+  const globalAttrRe = new RegExp(ATTR_RE.source, 'g');
+  for (const m of (String(text || '').match(globalAttrRe) || [])) words.add(m);
+  for (const part of String(hint || '').split(/[\s、，,\/]+/)) {
+    const w = part.trim();
+    if (w) words.add(w);
+  }
+  return [...words];
 }
 
 // 属性名词白名单与判据统一放在 utils/attrClassify.js（isAttrNoun / SEARCHABLE_ATTRS），
@@ -804,8 +825,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 否则问"大熊猫 身高"，卡片里塞满脑容量/排便等无关句——观感即"答非所问"，
     // 且用户点手动入库会把无关句存进词条。
     // 近义表统一用模块级 ATTR_SYNONYMS（与检索扩展、KB 匹配同一份，避免三处口径漂移）。
+    // 多属性查询（"体重 身高"）用**全部属性词的并集**过滤——只认第一个属性词会把
+    // 其它属性的数据句全部滤掉，表现为"直接解答有数据、结构化数据卡为空"。
     if (hint) {
-      const keys = [hint, ...(ATTR_SYNONYMS[hint] || [])];
+      const attrWords = attrWordsOf(text, hint);
+      const keys = attrWords.flatMap(w => [w, ...(ATTR_SYNONYMS[w] || [])]);
       const rel = (s) => keys.some(k => String(s || '').includes(k));
       factCard.facts = factCard.facts.filter(f => rel(f.property) || rel(f.value));
     }

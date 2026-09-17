@@ -1,5 +1,5 @@
 {
-  "_comment": "官方域名白名单 - 季度更新源。用于官方性评分算法（officialScore.js）和 Brave Search site: 过滤。",
+  "_comment": "官方域名白名单 - 季度更新源。用于官方性评分算法（officialScore.js）的官方性加分，以及检索结果优先级的 site: 过滤。",
   "_update_guide": "每季度末核对各站点是否仍可访问、是否有新增部委域名，更新后同步到 wrangler.toml 的 OFFICIAL_WHITELIST 变量。",
   "whitelist": [
     "stats.gov.cn",

@@ -4,5 +4,5 @@
 
 SILICONFLOW_KEY=sk-你的SiliconFlow密钥
 WORKER_KEY=管理员密码
-BRAVE_API_KEY=你的BraveSearch密钥
+TAVILY_KEY=你的Tavily密钥（免费 1000 credits/月）
 KB_CURATOR_PASSWORD=知识库审核员密码

@@ -31,18 +31,18 @@ $siliconKey = Read-Host "  粘贴 SiliconFlow Key"
 # Secret 2: WORKER_KEY
 Write-Host ""
 Write-Host "【2/4】WORKER_KEY（管理员密码）" -ForegroundColor Yellow
-$workerKey = Read-Host "  自定义一个管理员密码，比如 fc-admin-2026"
+$workerKey = Read-Host "  自定义一个管理员密码（建议 16 位以上随机串，切勿沿用示例值）"
 
-# Secret 3: BRAVE_API_KEY
+# Secret 3: TAVILY_KEY
 Write-Host ""
-Write-Host "【3/4】BRAVE_API_KEY" -ForegroundColor Yellow
-Write-Host "  去 https://brave.com/search/api/ 注册获取（免费额度够编辑团队用）" -ForegroundColor Gray
-$braveKey = Read-Host "  粘贴 Brave API Key"
+Write-Host "【3/4】TAVILY_KEY" -ForegroundColor Yellow
+Write-Host "  去 https://tavily.com 注册获取（免费 1000 credits/月，每月 1 日重置）" -ForegroundColor Gray
+$tavilyKey = Read-Host "  粘贴 Tavily API Key"
 
 # Secret 4: KB_CURATOR_PASSWORD
 Write-Host ""
 Write-Host "【4/4】KB_CURATOR_PASSWORD（知识库审核员密码）" -ForegroundColor Yellow
-$kbPassword = Read-Host "  自定义一个知识库审核密码，比如 fc-curator-2026"
+$kbPassword = Read-Host "  自定义一个知识库审核密码（建议 16 位以上随机串）"
 
 # 3. 用 Cloudflare API 批量设置 Secret
 Write-Host ""
@@ -73,7 +73,7 @@ function Set-WorkerSecret {
 
 Set-WorkerSecret "SILICONFLOW_KEY" $siliconKey
 Set-WorkerSecret "WORKER_KEY" $workerKey
-Set-WorkerSecret "BRAVE_API_KEY" $braveKey
+Set-WorkerSecret "TAVILY_KEY" $tavilyKey
 Set-WorkerSecret "KB_CURATOR_PASSWORD" $kbPassword
 
 # 4. 重新部署让 Secret 生效

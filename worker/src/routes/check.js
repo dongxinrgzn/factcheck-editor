@@ -16,9 +16,14 @@ import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCi
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
 // 单次核查最多处理的断言条数
-// 权衡：条数越多覆盖越全，但检索+评级耗时线性增长（实测约 4s/条）。
-// 10 条 ≈ 40s，是"逐点覆盖"与"可用等待时长"的平衡点；超出部分由前端提示分段提交。
-const MAX_CLAIMS = 10;
+// 权衡：条数越多覆盖越全，但检索+评级耗时与**子请求数**线性增长（约 4s、8 个子请求/条）。
+// Cloudflare 免费版单次调用子请求上限 50：主流程预留 ~20，断言预算 ~30 → 全量检索
+// 最多养得起 4 条左右。超出 MAX_CLAIMS 的部分由前端提示分段提交；
+// 超出**子请求预算**的断言不再独立检索，复用主检索结果评级（见断言循环 budgetLeft）。
+const MAX_CLAIMS = 6;
+// 断言独立检索的总预算（每条估扣 CLAIM_BUDGET_COST）。归零后断言走"主检索复用"轻量路径。
+const CLAIM_SEARCH_BUDGET = 24;
+const CLAIM_BUDGET_COST = 8;
 
 // 整段原文直配门槛（见 runCheck 的"整段原文核查"）：
 // 被核查的整段文字有 ≥70% 的内容二元组出现在同一个可引用页面的标题/摘要里、
@@ -1161,6 +1166,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
 
   // 2. 对每条断言检索证据（逐点覆盖：不再截断到 5 条；限并发避免打爆检索源）
   //    知识库优先：先按断言（及其实体）查 KB，命中则直接采用，不再走全网检索。
+  //    子请求预算（Cloudflare 免费版单次调用上限 50，主流程已用 ~20）：
+  //    独立检索每条最坏 4 轮 ≈16 个子请求，预算归零后断言改走"主检索复用"
+  //    轻量路径（不独立检索，拿主检索结果按相关性过滤后评级），保证每条断言都有结果。
+  let claimBudgetLeft = CLAIM_SEARCH_BUDGET;
   const checkSearches = await mapLimit(
     claims.slice(0, maxClaims), 4, async (c) => {
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
@@ -1232,6 +1241,19 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }
         try { await cacheDelete(env.FACT_CACHE, cacheK); } catch { /* 删不掉也无妨 */ }
       }
+
+      // ---- 子请求预算闸门：归零后不再独立检索，复用主检索结果 ----
+      // 评级照常进行（LLM 每次 1 个子请求），保证每条断言都有结果而非"评级未完成"。
+      if (claimBudgetLeft <= 0) {
+        const reused = (entity2 || c.claim || '')
+          ? filterRelevant(Array.isArray(searchResults) ? searchResults : [], entity2 || c.claim, { strictName: true, claimText: c.claim }).slice(0, 6)
+          : (Array.isArray(searchResults) ? searchResults.slice(0, 6) : []);
+        return {
+          claim: c, query: `【额度受限·复用主检索】${sq.slice(0, 30)}`,
+          results: reused, fromKB: false, budgetCapped: true,
+        };
+      }
+      claimBudgetLeft -= CLAIM_BUDGET_COST;
 
       try {
         // 必须传 tavilyApiKey：braveSearch 在维基命中时会短路，结果常清一色
@@ -1444,6 +1466,8 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         lastErr = 'LLM 返回空';
       } catch (e) {
         lastErr = e.message;
+        // 子请求超限（免费版单次调用上限 50）时重试必再失败，白烧一个子请求——直接放弃。
+        if (/Too many subrequests/i.test(String(e && e.message))) break;
       }
     }
     // 两次都失败：仍保留检索来源，明确标注为"评级未完成"而非静默丢弃证据。

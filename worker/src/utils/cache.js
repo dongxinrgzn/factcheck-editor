@@ -109,11 +109,36 @@ export async function cacheDelete(kv, key) {
 // 等于把保险和证据一起销毁（本地 KB 曾无声丢词条，这两样是唯一的兜底）。
 const CACHE_PREFIXES = ['q:', 'anc:', 'rate:', 'clm:', 'kbSel:'];
 
+// 清理冷却：KV 是最终一致存储，delete 后 list 在 ~1 分钟内仍可能返回旧 key
+// （边缘节点未同步），重复点"清缓存"会对同一批幽灵 key 重复删除，
+// 每次都显示"清了 N 条"，让用户误以为删不干净。冷却窗口内的重复清理
+// 直接返回 0 并标记 cooldown，等传播完成。
+const CLEAR_COOLDOWN_MS = 90 * 1000;
+const CLEAR_STAMP_KEY = 'meta:cacheClearAt';
+
+/** 冷却检查：返回 true = 允许清理；false = 刚清过（传播窗口内） */
+export async function acquireClearLock(kv) {
+  if (!kv) return true;
+  try {
+    const v = await kv.get(CLEAR_STAMP_KEY);
+    if (v && Date.now() - Number(v) < CLEAR_COOLDOWN_MS) return false;
+  } catch {}
+  return true;
+}
+
+/** 清理完成后打时间戳（进入冷却窗口） */
+export async function markCacheCleared(kv) {
+  try { await kv.put(CLEAR_STAMP_KEY, String(Date.now()), { ttl: 3600 }); } catch {}
+}
+
 /**
  * 清除所有缓存（仅 CACHE_PREFIXES 命中的条目，备份与审计不动）
+ * opts.skipLock：调用方已在 action 层持有锁时跳过内部冷却检查（避免同一次
+ * 点击里第二个清理函数被第一个刚打的时间戳误挡）。
  */
-export async function clearAllCache(kv) {
+export async function clearAllCache(kv, opts = {}) {
   if (!kv) return { cleared: 0 };
+  if (!opts.skipLock && !(await acquireClearLock(kv))) return { cleared: 0, cooldown: true };
   let cleared = 0;
   for (const prefix of CACHE_PREFIXES) {
     let cursor = null;
@@ -134,14 +159,16 @@ export async function clearAllCache(kv) {
       else cursor = null;
     } while (cursor);
   }
+  if (cleared > 0 && !opts.skipLock) await markCacheCleared(kv);
   return { cleared };
 }
 
 /**
  * 清除知识库缓存（FACT_KB 中以 kbcache: 开头的缓存条目）
  */
-export async function clearKBCache(kv) {
+export async function clearKBCache(kv, opts = {}) {
   if (!kv) return { cleared: 0 };
+  if (!opts.skipLock && !(await acquireClearLock(kv))) return { cleared: 0, cooldown: true };
   let cleared = 0;
   try {
     const list = await kv.list({ prefix: 'kbcache:', limit: 1000 });
@@ -153,6 +180,7 @@ export async function clearKBCache(kv) {
       } catch {}
     }
   } catch {}
+  if (cleared > 0 && !opts.skipLock) await markCacheCleared(kv);
   return { cleared };
 }
 

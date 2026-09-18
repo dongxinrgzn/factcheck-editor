@@ -3,7 +3,7 @@
 import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey } from '../utils/llmProxy.js';
 import { submitDraft, approveEntry, mergeEntry, clearPending, listPending, listStale, autoAudit, listVerified, searchEntries, deleteEntry, getEntry, slugify, backupKB, normalizeCardFacts } from '../utils/kbStore.js';
-import { clearAllCache, clearKBCache } from '../utils/cache.js';
+import { clearAllCache, clearKBCache, acquireClearLock, markCacheCleared } from '../utils/cache.js';
 import { runCheck } from './check.js';
 
 export async function handleKbSubmit(request, env) {
@@ -157,17 +157,31 @@ export async function handleKbSubmit(request, env) {
   }
 
   // 清除所有缓存
+  // 冷却在 action 层统一持有：KV 删除有 ~1 分钟传播窗口，期间 list 仍会返回
+  // 已删的幽灵 key，连点会对同一批重复删除、每次都显示"清了 N 条"。
+  // 90 秒冷却窗口内的重复请求直接返回 0 + cooldown 标记（前端提示"无缓存可清"）。
   if (action === 'clear_cache') {
     const { type = 'all' } = body;
+    const locked = await acquireClearLock(env.FACT_CACHE);
+    if (!locked) {
+      return jsonResponse({ ok: true, data: {
+        searchCache: { cleared: 0, cooldown: true },
+        kbCache: { cleared: 0, cooldown: true },
+      } }, 200, request);
+    }
     let result = {};
+    let clearedTotal = 0;
     if (type === 'all' || type === 'search') {
-      const searchResult = await clearAllCache(env.FACT_CACHE);
+      const searchResult = await clearAllCache(env.FACT_CACHE, { skipLock: true });
       result.searchCache = searchResult;
+      clearedTotal += searchResult.cleared || 0;
     }
     if (type === 'all' || type === 'kb') {
-      const kbResult = await clearKBCache(env.FACT_KB);
+      const kbResult = await clearKBCache(env.FACT_KB, { skipLock: true });
       result.kbCache = kbResult;
+      clearedTotal += kbResult.cleared || 0;
     }
+    if (clearedTotal > 0) await markCacheCleared(env.FACT_CACHE);
     return jsonResponse({ ok: true, data: result }, 200, request);
   }
 

@@ -508,6 +508,51 @@ const DATA_EN_RE = new RegExp('[^.\\n]*\\d[\\d.,\\-–—~]*\\s*(?:' + EN_UNIT +
  * 把检索结果（维基 + 官方站）中的数据句解析成百科卡片（属性→数值→来源）
  * 官方来源（gov-direct / ★官方）优先
  */
+/**
+ * 诗句/引文断言确定性补抽（verify 模式）。
+ * LLM 抽取对引文原句不稳（时抽时不抽），没有诗句断言逐句核对就没有对象。
+ * 规则：引号内 ≥12 字的文本视为引文 → 按 [。！？；] 切联（逗号连接的分句算同一联，
+ * 与逐句验票的粒度一致）→ 每联去空白后 ≥6 字 → LLM 已覆盖（claim 互相包含）则跳过。
+ * entity 取引文前的《作品名》，keywords 取 (作者)，searchHint 用"作品名+联原文"
+ * ——原句检索对诗词收录页召回最好（整段核查同款思路）。
+ */
+function appendQuoteClaims(text, claims) {
+  const s = String(text || '');
+  const out = Array.isArray(claims) ? [...claims] : [];
+  const norm = (x) => String(x || '').replace(/[\s，。；、·,.;:"'"“”()（）]/g, '');
+  try {
+    const titleM = s.match(/《([^》]{2,20})》/);
+    const authorM = s.match(/[(（]([^）)]{2,8})[）)]/);
+    const title = titleM ? titleM[1] : '';
+    const author = authorM ? authorM[1] : '';
+    const qRe = /["“][^"”]{12,}["”]/g;
+    let qm;
+    while ((qm = qRe.exec(s)) !== null) {
+      const quote = qm[0].slice(1, -1);
+      for (const clauseRaw of quote.split(/[。！？；]/)) {
+        const clause = clauseRaw.replace(/\s+/g, '').replace(/^[，,、]+|[，,、]+$/g, '');
+        if (clause.length < 6) continue;
+        const covered = out.some(c => {
+          const cc = norm(c.claim);
+          const nn = norm(clause);
+          return !cc || !nn || cc.includes(nn) || nn.includes(cc);
+        });
+        if (covered) continue;
+        out.push({
+          claim: clause,
+          entity: title || clause.slice(0, 6),
+          metric: '原文',
+          keywords: author,
+          searchHint: title ? `${title} ${clause.slice(0, 10)}` : clause.slice(0, 14),
+          time: '',
+          quoteClaim: true,
+        });
+      }
+    }
+  } catch { /* 补抽失败保持原 claims */ }
+  return out;
+}
+
 function buildFactCard(results, entity, queryText = '', hint = '') {
   const facts = [];
   const list = Array.isArray(results) ? results : [];
@@ -1048,6 +1093,18 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     }
   }
 
+  // 诗句/引文断言**确定性补抽**：LLM 抽取对引文原句不稳（实测《浪淘沙·其六》
+  // 混合文本只抽出"作者"元信息，诗句一句不抽）——没有诗句断言，逐句核对
+  // 就没有对象，诗词语料站的"原文一致"采信通道永远不触发。
+  // 程序化从原文引号内识别引文、按句读切联，LLM 已覆盖的（claim 文本重叠）跳过。
+  if (mode === 'verify' && Array.isArray(claims)) {
+    const before = claims.length;
+    claims = appendQuoteClaims(text, claims);
+    if (claims.length > before) {
+      try { await cacheSet(env.FACT_CACHE, claimsK, claims, CLAIMS_TTL); } catch {}
+    }
+  }
+
   if (!Array.isArray(claims) || claims.length === 0) {
     return { claims: [], searches: [], ratings: [], rating: 'unknown', corrections: [], draftCard: null };
   }
@@ -1213,6 +1270,44 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             fromKB: false,
           };
         }
+      }
+      // ---- 诗句原文断言：针对性原文比对（不依赖整段命中）----
+      // 整段检索时好时坏（本轮未命中时诗句断言会落回通用 LLM 评级——证据匹配难，
+      // 实测"淘金女伴满江隈"被评低）。诗句断言的正确核查方式就是原文比对：
+      // 用"作品名+诗句"检索收录页，断言句在页面标题/摘要中覆盖率达标即"原文一致"。
+      // 消耗 1 次检索，诗句断言通常 2-4 条，量可控。
+      if ((c.metric === '原文' || c.quoteClaim) && (env.TAVILY_KEY || env.SERPER_KEY)) {
+        try {
+          const claimText = String(c.claim || '').trim();
+          if (claimText.length >= 6) {
+            const vq = (c.searchHint && c.searchHint.trim()) || `${entity2 || ''} ${claimText}`.trim();
+            let vres = [];
+            if (env.TAVILY_KEY) {
+              const tv = await tavilySearch(vq, { apiKey: env.TAVILY_KEY, topK: 4, searchDepth: 'basic' });
+              vres = (tv.results || []).filter(r => r && r.url && r.snippet);
+            }
+            if (!vres.length && env.SERPER_KEY) {
+              const sp = await serperSearch(vq, { apiKey: env.SERPER_KEY, topK: 4 });
+              vres = (sp.results || []).filter(r => r && r.url && r.snippet);
+            }
+            for (const r of vres) {
+              const qc = quoteCoverage(claimText, `${r.title || ''} ${r.snippet || ''}`);
+              if (qc.overlap >= 6 && qc.coverage >= 0.6) {
+                let vdomain = '';
+                try { vdomain = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
+                return {
+                  claim: c,
+                  query: `【原文比对】${(r.title || vdomain).slice(0, 30)}`,
+                  results: annotateResults(vres, env),
+                  wholeMatch: true,
+                  segInfo: { url: r.url, title: r.title, domain: vdomain, coverage: Number(qc.coverage.toFixed(2)), via: 'poetry' },
+                  segSnippet: r.snippet,
+                  fromKB: false,
+                };
+              }
+            }
+          }
+        } catch { /* 比对失败落回常规逐点 */ }
       }
       const metricRaw = (c.metric && c.metric.trim()) ? c.metric.trim() : '';
       // hint 仅传属性名（维基深度抽取用），数值不当 hint；

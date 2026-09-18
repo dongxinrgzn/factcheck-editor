@@ -84,6 +84,20 @@ export function isAuthoritativeTextSource(url) {
 }
 
 /**
+ * 古籍/诗词语料站点判定。
+ * 与"教辅≠课本"口径的区别：诗词原文不是课本发布的，是古籍传承的公共文本——
+ * 断言"美人首饰侯王印，尽是沙中浪底来"的核查目标就是**这句诗是不是这样写**，
+ * 在诗词语料站逐字重现即核对通过，不需要"权威课本"背书。
+ * 故此类站点的整段命中，引文断言按"原文一致"采信（仅判高，不自动入库）。
+ */
+export function isPoetryCorpusSite(url) {
+  const d = extractDomain(url);
+  if (!d) return false;
+  return /gushiwen|shici|poetry|poem|wikisource|shiwen|tangshi|songci/.test(d)
+    || /古诗文|诗词|唐诗|宋词/.test(decodeURIComponent(url).slice(0, 300));
+}
+
+/**
  * 百科类域名判定：维基/百度百科等是权威参考，但不是政府官方
  */
 function isEncyclopedia(domain) {

@@ -4,7 +4,7 @@ import { getClientIp, jsonResponse, errorJson } from '../utils/cors.js';
 import { resolveApiKey, callLLMJson } from '../utils/llmProxy.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
 import { cacheGet, cacheSet, cacheDelete, searchCacheKey, SEARCH_TTL, ratingCacheKey, claimsCacheKey, RATING_TTL, CLAIMS_TTL, kbSelectCacheKey, KB_SEL_TTL } from '../utils/cache.js';
-import { annotateResults, sourceTier, isAuthoritativeTextSource } from '../utils/officialScore.js';
+import { annotateResults, sourceTier, isAuthoritativeTextSource, isPoetryCorpusSite } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
@@ -1157,7 +1157,14 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             wholeResults = annot;
           } else {
             best.referenceOnly = true;
+            // 诗词语料站（古诗文网/诗词库/维基文库…）的整段命中：引文断言走
+            // "原文一致性"核对（逐句验票命中即判高），不适用"教辅≠课本"的压制——
+            // 诗词不是课本发布的文本，收录页逐字重现即是核对通过。
+            // 仅判高不自动入库（autoAudit 的官方来源关不会放行，保守起见）。
+            best.poetryCorpus = isPoetryCorpusSite(best.url);
             referenceMatch = best;
+            // 诗词语料通道的引文断言要带整段检索结果当来源展示（sources）
+            if (best.poetryCorpus) wholeResults = annot;
           }
         }
       } catch { /* 整段检索失败 → 照旧逐点核查 */ }
@@ -1178,11 +1185,15 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       // （"点燃,火焰呈淡蓝色"）跟着整段一起被判"高"，而命中页里根本没有这句话。
       // 只有本断言自身也出现在命中页里（覆盖率 ≥0.6 且重合 ≥6 个二元组）才能搭这趟车；
       // 否则该断言照旧走下面的逐点检索 + 评级。
-      if (wholeMatch) {
+      // 诗词语料站的 referenceMatch 同样参与验票：引文断言（诗句本身）在收录页
+      // 逐字重现 → 按"原文一致"采信（判高）。现代说明句不会在诗词语料页重现，
+      // 验票天然不通过、照旧逐点评级——分流安全。
+      const segMatch = wholeMatch || (referenceMatch && referenceMatch.poetryCorpus ? referenceMatch : null);
+      if (segMatch) {
         const inPage = (() => {
           const t = String(c.claim || '').replace(/[“”"]/g, '');
           if (!t) return false;
-          const q = quoteCoverage(t, `${wholeMatch.title || ''} ${wholeMatch.snippet || ''}`);
+          const q = quoteCoverage(t, `${segMatch.title || ''} ${segMatch.snippet || ''}`);
           return q.overlap >= 6 && q.coverage >= 0.6;
         })();
         if (inPage) {
@@ -1193,9 +1204,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           if (kb) return { claim: c, query: buildSearchQuery(c), results: kb.results, kb: kb.info, fromKB: true, wholeMatch: true };
           return {
             claim: c,
-            query: `【整段原文直配】${wholeMatch.title || wholeMatch.domain}`,
+            query: `【${segMatch === wholeMatch ? '整段原文直配' : '原文一致·诗词语料'}】${segMatch.title || segMatch.domain}`,
             results: wholeResults,
             wholeMatch: true,
+            // 评级环节展示命中页信息与挑证据句用（诗词语料通道下闭包 wholeMatch 为 null）
+            segInfo: { url: segMatch.url, title: segMatch.title, domain: segMatch.domain, coverage: segMatch.coverage, via: segMatch === wholeMatch ? 'textbook' : 'poetry' },
+            segSnippet: segMatch.snippet,
             fromKB: false,
           };
         }
@@ -1337,7 +1351,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     if (sr.wholeMatch) {
       const evText = sr.fromKB
         ? (sr.kb?.facts || []).slice(0, 2).map(f => `${f.label || ''}：${f.value || ''}`).join('；')
-        : pickFactSentence(String(wholeMatch.snippet || ''), {
+        : pickFactSentence(String(sr.segSnippet || ''), {
             metric: sr.claim?.metric || '',
             anchor: sr.claim?.claim || '',
             requireAnchor: true,
@@ -1351,10 +1365,10 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         fromKB: !!sr.fromKB,
         kbInfo: sr.kb,
         wholeMatch: true,
-        wholeMatchInfo: {
+        wholeMatchInfo: sr.segInfo || (wholeMatch && {
           url: wholeMatch.url, title: wholeMatch.title,
           coverage: Number(wholeMatch.coverage.toFixed(2)), domain: wholeMatch.domain,
-        },
+        }),
       };
     }
     // 知识库命中的断言：KB 事实作为**证据**走与全网证据同一把尺子（评级 LLM），

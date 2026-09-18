@@ -11,7 +11,7 @@ import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
 import { buildDraftCard, buildStoreCardsByEntity } from '../utils/draftBuilder.js';
-import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource, quoteCoverage, pickFactSentence, bigramOverlap } from '../utils/attrClassify.js';
+import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCitableSource, INDICATORS, isAttrNoun, storeFactsOf, bestCitableSource, quoteCoverage, pickFactSentence, bigramOverlap, normZh } from '../utils/attrClassify.js';
 
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
@@ -503,7 +503,7 @@ const DATA_EN_RE = new RegExp('[^.\\n]*\\d[\\d.,\\-–—~]*\\s*(?:' + EN_UNIT +
  * 把检索结果（维基 + 官方站）中的数据句解析成百科卡片（属性→数值→来源）
  * 官方来源（gov-direct / ★官方）优先
  */
-function buildFactCard(results, entity, queryText = '') {
+function buildFactCard(results, entity, queryText = '', hint = '') {
   const facts = [];
   const list = Array.isArray(results) ? results : [];
 
@@ -519,7 +519,9 @@ function buildFactCard(results, entity, queryText = '') {
   const wantYear = yearM ? yearM[0] : '';
 
   for (const r of sorted) {
-    const snip = (r.snippet || '')
+    // 摘要先做繁→简归一：维基正文是繁体，"釐米/公噸"不归一，
+    // 下面的简体单位正则永远匹配不到 → 肩高等数据句整句漏抽。
+    const snip = normZh(r.snippet || '')
       .replace(/【[^】]*】/g, ' ')
       .replace(/```[\s\S]*?```/g, ' ')       // 代码块
       .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1') // **加粗**
@@ -560,8 +562,17 @@ function buildFactCard(results, entity, queryText = '') {
     }
   }
 
-  // 排序：官方优先 → 含目标年份优先
-  facts.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
+  // 排序：官方优先 → hint 属性命中优先 → 含目标年份优先。
+  // hint 加权必须在 12 条截断**之前**：带属性查询时（"大熊猫 身高"）无关的
+  // "相关数据"句（栖息地/游客量…）会把肩高句挤出前 12，随后 hint 过滤
+  // 就只剩空卡（实测 12 条无一含身高/肩高）。外层的 hint 过滤保留作双保险。
+  const hintKeys = hint
+    ? attrWordsOf(queryText, hint).flatMap(w => [w, ...(ATTR_SYNONYMS[w] || [])])
+    : [];
+  const hintHit = (f) => hintKeys.some(k => String(f.property || '').includes(k) || String(f.value || '').includes(k));
+  facts.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0)
+    || (hintHit(b) ? 1 : 0) - (hintHit(a) ? 1 : 0)
+    || (b.yearHit ? 1 : 0) - (a.yearHit ? 1 : 0));
 
   // 去重：同属性+相似开头只留一条（优先官方/含年份）
   const seen = new Set();
@@ -819,7 +830,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   if (intent === 'query') {
     // （KB 命中已在上方提前返回，此处为未命中走全网检索的路径）
 
-    const factCard = buildFactCard(searchResults, entity || text.trim(), text);
+    const factCard = buildFactCard(searchResults, entity || text.trim(), text, hint);
 
     // 带属性词的查询：把数据卡过滤到只留与属性相关的数据句。
     // 否则问"大熊猫 身高"，卡片里塞满脑容量/排便等无关句——观感即"答非所问"，

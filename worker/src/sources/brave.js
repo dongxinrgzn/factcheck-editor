@@ -33,6 +33,9 @@ const TRAD2SIMP = {
   '藥': '药', '經': '经', '濟': '济', '財': '财', '貿': '贸', '轉': '转', '運': '运',
   '輪': '轮', '戶': '户', '燈': '灯', '號': '号', '稱': '称', '則': '则', '額': '额',
   '豐': '丰', '層': '层', '島': '岛', '灣': '湾', '臺': '台', '華': '华',
+  // 度量衡繁体缺字（与 attrClassify.TRAD2SIMP 同步）：维基繁体正文的"釐米/公噸"
+  // 不归一，深度抽取的简体单位正则（STRONG_UNIT）匹配不到 → 肩高等数据句整句漏掉。
+  '釐': '厘', '噸': '吨',
 };
 const TRAD2SIMP_RE = new RegExp('[' + Object.keys(TRAD2SIMP).join('') + ']', 'g');
 function normZh(s) {
@@ -242,7 +245,7 @@ async function wikiExtract(lang, title) {
     if (!resp.ok) return '';
     const j = await resp.json();
     const ext = j?.query?.pages?.[0]?.extract || '';
-    return stripHtml(ext).slice(0, 600);
+    return normZh(stripHtml(ext)).slice(0, 600);
   } catch { return ''; }
 }
 
@@ -284,7 +287,9 @@ async function wikiExtractDeep(lang, title, hint = '') {
     clearTimeout(t);
     if (!resp.ok) return intro;
     const j = await resp.json();
-    const full = j?.query?.pages?.[0]?.extract || '';
+    // 维基中文正文多为繁体：先归一成简体，下面的数据句正则（简体单位表）
+    // 才能匹配"釐米/公噸"这类句子（实测"肩高為65-75釐米"不归一就整句漏抽）。
+    const full = normZh(j?.query?.pages?.[0]?.extract || '');
     if (!full) return intro;
 
     // 提取含数字+单位的数据句；若有 hint（如"体重"），优先含 hint 的句子

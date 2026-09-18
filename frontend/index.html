@@ -919,12 +919,51 @@ body {
           });
           renderResults(ancientSources.concat(fcSrc));
         } else {
-          var cd = await apiFetch('/api/check', {
-            method: 'POST',
-            body: JSON.stringify({ text: text, mode: 'verify' })
+          // 查证模式：自动续查——单次调用受 Cloudflare 子请求上限约束（每批最多 6 条断言），
+          // 有剩余时自动带 claimOffset 发起下一批，前端合并结果，用户无需手动分段。
+          var offset = 0, cd = null, guard = 0;
+          do {
+            var part = await apiFetch('/api/check', {
+              method: 'POST',
+              body: JSON.stringify({ text: text, mode: 'verify', claimOffset: offset })
+            });
+            if (!cd) { cd = part; }
+            else {
+              // 追加后续批：断言评级、检索来源、整体统计
+              (cd.ratings = cd.ratings || []).push.apply(cd.ratings, part.ratings || []);
+              (cd.searches = cd.searches || []).push.apply(cd.searches, part.searches || []);
+              (cd.corrections = cd.corrections || []).push.apply(cd.corrections, part.corrections || []);
+              cd.truncated = part.truncated;
+              // 合并后重算整体评级（后批响应的 overall 只统计了本批）
+              var cnt = {};
+              (cd.ratings || []).forEach(function(r) { cnt[r.rating] = (cnt[r.rating] || 0) + 1; });
+              cd.rating = cnt['低'] ? '低' : (cnt['中'] ? '中' : '高');
+            }
+            offset = part.nextClaimOffset;
+            if (offset != null) {
+              // 剩余内容查询中……（先渲染已到的，让用户边看边等）
+              var doneN = (cd.ratings || []).length;
+              var remainN = Math.max(0, (part.totalClaims || doneN) - doneN);
+              $('report-area').innerHTML = '<div class="loading">已核查 ' + doneN + ' 条，剩余 ' + remainN + ' 条查询中……</div>';
+            }
+            guard++;
+          } while (offset != null && guard < 6);
+
+          // 检索结果区只展示两类**有用**来源：主检索结果 + 各断言评级实际引用的来源。
+          // 不再把所有断言的中间检索结果全量混展——弱实体断言（如"金""淘金"）
+          // 会召回大量无关词条（韩剧/黄河/城市…），混在一起全是噪音。
+          var seenUrl = {};
+          var shown = [];
+          var pushUnique = function(r) {
+            if (r && r.url && !seenUrl[r.url]) { seenUrl[r.url] = 1; shown.push(r); }
+          };
+          (cd.searches || []).forEach(function(s) {
+            (s.results || []).forEach(pushUnique);
           });
-          var allResults = (cd.searches || []).flatMap(function(s) { return s.results || []; });
-          renderResults(allResults);
+          (cd.ratings || []).forEach(function(rt) {
+            (rt.sources || []).forEach(pushUnique);
+          });
+          renderResults(shown.slice(0, 15));
           renderReport(cd);
         }
       } else {

@@ -16,14 +16,16 @@ import { CN_UNIT, EN_UNIT, makeDataRe, classifyProp, splitMultiAttrClauses, isCi
 const MODEL = 'Qwen/Qwen2.5-72B-Instruct';
 
 // 单次核查最多处理的断言条数
-// 权衡：条数越多覆盖越全，但检索+评级耗时与**子请求数**线性增长（约 4s、8 个子请求/条）。
-// Cloudflare 免费版单次调用子请求上限 50：主流程预留 ~20，断言预算 ~30 → 全量检索
-// 最多养得起 4 条左右。超出 MAX_CLAIMS 的部分由前端提示分段提交；
-// 超出**子请求预算**的断言不再独立检索，复用主检索结果评级（见断言循环 budgetLeft）。
+// 权衡：条数越多覆盖越全，但检索+评级耗时与**子请求数**线性增长。
+// Cloudflare 免费版单次调用子请求上限 50：主流程（解析+主检索+整段核查+抽取+入库）
+// 实测 ~18-22，剩余 ~30 养 6 条断言刚好（每条成本见下）。超出 MAX_CLAIMS 的部分
+// 由前端提示分段提交；超出**子请求预算**的断言不再独立检索，复用主检索结果评级。
 const MAX_CLAIMS = 6;
-// 断言独立检索的总预算（每条估扣 CLAIM_BUDGET_COST）。归零后断言走"主检索复用"轻量路径。
-const CLAIM_SEARCH_BUDGET = 24;
-const CLAIM_BUDGET_COST = 8;
+// 断言总预算与单项成本（按实测消耗估）：每条断言 = KB 查（2~4 个 KV get）
+// + 独立检索 1~2 + 评级 LLM 1 ≈ 7；诗句原文比对额外 2（检索+可能兜底）。
+// ⚠️ KV 读写也占子请求额度，此前漏算 KB 查导致第 5、6 条断言评级爆 1102。
+const CLAIM_SEARCH_BUDGET = 28;
+const CLAIM_BUDGET_COST = 7;
 
 // 整段原文直配门槛（见 runCheck 的"整段原文核查"）：
 // 被核查的整段文字有 ≥70% 的内容二元组出现在同一个可引用页面的标题/摘要里、
@@ -440,7 +442,7 @@ export async function handleCheck(request, env) {
     return errorJson('请求体格式错误', 400, 'BAD_REQUEST', request);
   }
 
-  const { text, context, mode = 'query' } = body;
+  const { text, context, mode = 'query', claimOffset = 0 } = body;
   if (!text || typeof text !== 'string') {
     return errorJson('text 字段必填', 400, 'BAD_REQUEST', request);
   }
@@ -459,7 +461,7 @@ export async function handleCheck(request, env) {
   }
 
   try {
-    const data = await runCheck(text, context, env, apiKey, { autoDraft: true, mode });
+    const data = await runCheck(text, context, env, apiKey, { autoDraft: true, mode, claimOffset });
     return jsonResponse({ ok: true, data }, 200, request);
   } catch (e) {
     return errorJson(e.message, 502, 'CHECK_ERROR', request);
@@ -649,7 +651,7 @@ function sourcesWithTier(arr) {
   return (arr || []).map(r => (r && r.url ? { ...r, tier: sourceTier(r.url) } : r));
 }
 
-export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query', maxClaims = MAX_CLAIMS, skipSearchFallback = false } = {}) {
+export async function runCheck(text, context, env, apiKey, { autoDraft = false, mode = 'query', maxClaims = MAX_CLAIMS, skipSearchFallback = false, claimOffset = 0 } = {}) {
   const intent = mode === 'verify' ? 'assertion' : 'query';
 
   // 0. 两种模式共享的：检索
@@ -1234,8 +1236,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   //    独立检索每条最坏 4 轮 ≈16 个子请求，预算归零后断言改走"主检索复用"
   //    轻量路径（不独立检索，拿主检索结果按相关性过滤后评级），保证每条断言都有结果。
   let claimBudgetLeft = CLAIM_SEARCH_BUDGET;
+  // 分批续查：claimOffset 由前端携带（自动续查后续批），跳过已核查的前 N 条。
+  const claimsTotal = claims.length;
+  const batch = claims.slice(claimOffset, claimOffset + maxClaims);
   const checkSearches = await mapLimit(
-    claims.slice(0, maxClaims), 4, async (c) => {
+    batch, 4, async (c) => {
       const entity2 = (c.entity && c.entity.trim()) ? c.entity.trim() : '';
       // 整段原文已直配（wholeMatch）→ 不再逐点检索：直接沿用整段命中结果当证据。
       // ⚠️ 但要**逐句验票**：整段覆盖率高不代表每一句都被命中页收录——实测改写过的一句
@@ -1271,6 +1276,21 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           };
         }
       }
+      // ---- 子请求预算闸门（必须在 KB 查/诗句比对/独立检索**之前**）----
+      // KB 查（2~4 个 KV get）、检索、评级都占 Cloudflare 免费版 50 上限，
+      // 闸门放晚了这些消耗已花掉（实测第 5、6 条断言评级因此爆 1102）。
+      // 归零后断言不独立检索，复用主检索结果照常评级，保证每条都有结果。
+      if (claimBudgetLeft <= 0) {
+        const reused = (entity2 || c.claim || '')
+          ? filterRelevant(Array.isArray(searchResults) ? searchResults : [], entity2 || c.claim, { strictName: true, claimText: c.claim }).slice(0, 6)
+          : (Array.isArray(searchResults) ? searchResults.slice(0, 6) : []);
+        return {
+          claim: c, query: `【额度受限·复用主检索】${(buildSearchQuery(c) || '').slice(0, 30)}`,
+          results: reused, fromKB: false, budgetCapped: true,
+        };
+      }
+      claimBudgetLeft -= CLAIM_BUDGET_COST;
+
       // ---- 诗句原文断言：针对性原文比对（不依赖整段命中）----
       // 整段检索时好时坏（本轮未命中时诗句断言会落回通用 LLM 评级——证据匹配难，
       // 实测"淘金女伴满江隈"被评低）。诗句断言的正确核查方式就是原文比对：
@@ -1280,6 +1300,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         try {
           const claimText = String(c.claim || '').trim();
           if (claimText.length >= 6) {
+            claimBudgetLeft -= 2; // 诗句比对：1~2 次检索（Tavily→Serper 兜底），计入预算
             const vq = (c.searchHint && c.searchHint.trim()) || `${entity2 || ''} ${claimText}`.trim();
             let vres = [];
             if (env.TAVILY_KEY) {
@@ -1350,19 +1371,6 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }
         try { await cacheDelete(env.FACT_CACHE, cacheK); } catch { /* 删不掉也无妨 */ }
       }
-
-      // ---- 子请求预算闸门：归零后不再独立检索，复用主检索结果 ----
-      // 评级照常进行（LLM 每次 1 个子请求），保证每条断言都有结果而非"评级未完成"。
-      if (claimBudgetLeft <= 0) {
-        const reused = (entity2 || c.claim || '')
-          ? filterRelevant(Array.isArray(searchResults) ? searchResults : [], entity2 || c.claim, { strictName: true, claimText: c.claim }).slice(0, 6)
-          : (Array.isArray(searchResults) ? searchResults.slice(0, 6) : []);
-        return {
-          claim: c, query: `【额度受限·复用主检索】${sq.slice(0, 30)}`,
-          results: reused, fromKB: false, budgetCapped: true,
-        };
-      }
-      claimBudgetLeft -= CLAIM_BUDGET_COST;
 
       try {
         // 必须传 tavilyApiKey：braveSearch 在维基命中时会短路，结果常清一色
@@ -1680,8 +1688,11 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     rating: overallFinal,
     confidence,
     confidenceReason,
-    truncated: claims.length > maxClaims,
+    truncated: claimsTotal > claimOffset + batch.length,
     totalClaims: claims.length,
+    // 自动续查（前端循环携带 claimOffset 调后续批，直到 nextClaimOffset 为 null）
+    claimOffset,
+    nextClaimOffset: (claimOffset + batch.length < claimsTotal) ? claimOffset + batch.length : null,
     kbCount,
     corrections: ratings.filter(r => r.correction).map(r => ({
       claim: r.claim?.claim || '', correction: r.correction, evidence: r.evidence,

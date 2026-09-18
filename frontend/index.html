@@ -941,10 +941,13 @@ body {
             }
             offset = part.nextClaimOffset;
             if (offset != null) {
-              // 剩余内容查询中……（先渲染已到的，让用户边看边等）
+              // 剩余内容查询中……（**先渲染已到的批次**，让用户边看边等，
+              // 下一批返回后再整体重渲合并结果）
               var doneN = (cd.ratings || []).length;
               var remainN = Math.max(0, (part.totalClaims || doneN) - doneN);
-              $('report-area').innerHTML = '<div class="loading">已核查 ' + doneN + ' 条，剩余 ' + remainN + ' 条查询中……</div>';
+              renderReport(cd);
+              $('report-area').insertAdjacentHTML('beforeend',
+                '<div class="loading">已核查 ' + doneN + ' 条，剩余 ' + remainN + ' 条查询中……</div>');
             }
             guard++;
           } while (offset != null && guard < 6);
@@ -1025,14 +1028,22 @@ body {
   }
 
   // 单条断言的入库状态行（问题 3：入库提示跟着每一条结果，而不是右下角弹窗）
-  //   auto    → 已自动入库（自动审核）
-  //   skipped → 达到"高"但未过自动审核门槛，可手动入库
-  //   none    → 未达入库标准，仅作核查展示
+  //   auto     → 已自动入库（自动审核）
+  //   kb       → 知识库已有此事实（KB 命中，未重复入库）
+  //   existing → 评级高但词条已有相同事实（merge 去重，无新增）
+  //   skipped  → 达到"高"但未过自动审核门槛，可手动入库
+  //   none     → 未达入库标准，仅作核查展示
   function storeBadgeHtml(r) {
     var st = r && r.storeStatus;
     var t = (r && r.storeTitle) ? '（词条：' + escapeHtml(r.storeTitle) + '）' : '';
     if (st === 'auto') {
       return '<div class="store-status js-store-status store-status-auto">✓ 已自动入知识库（自动审核）' + t + '</div>';
+    }
+    if (st === 'kb') {
+      return '<div class="store-status js-store-status store-status-auto" style="color:#666;">▣ 知识库已有此事实，未重复入库' + t + '</div>';
+    }
+    if (st === 'existing') {
+      return '<div class="store-status js-store-status store-status-auto" style="color:#666;">▣ 词条已收录相同事实，本次无新增' + t + '</div>';
     }
     if (st === 'skipped') {
       return '<div class="store-status js-store-status store-status-skip">☆ 未达自动入库标准，可手动入库' + t +

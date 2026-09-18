@@ -1646,9 +1646,20 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
   ratings.forEach((rt) => {
     const ent = (rt.claim?.entity || draftCard?.title || '').trim();
     const hasSrc = Array.isArray(rt.sources) && rt.sources.length > 0;
-    if (rt.rating === 'high' && hasSrc && storedTitles.has(ent)) rt.storeStatus = 'auto';
-    else if (rt.rating === 'high' && hasSrc) rt.storeStatus = 'skipped';
-    else rt.storeStatus = 'none';
+    if (rt.fromKB) {
+      // 知识库命中的断言：事实已在库里，显示"知识库已有"而非"已自动入库"
+      // （重复查证同一文本时此前误显"已入库"，让用户以为又存了一遍）。
+      rt.storeStatus = 'kb';
+    } else if (rt.rating === 'high' && hasSrc && storedTitles.has(ent)) {
+      rt.storeStatus = 'auto';
+    } else if (rt.rating === 'high' && hasSrc && skippedTitles.has(ent) && partialSkipped.some(s => s.title === ent && s.existing)) {
+      // 评级高、词条已存在且无新增事实（merge 去重后 added=0）——如实显示
+      rt.storeStatus = 'existing';
+    } else if (rt.rating === 'high' && hasSrc) {
+      rt.storeStatus = 'skipped';
+    } else {
+      rt.storeStatus = 'none';
+    }
     rt.storeTitle = ent;
   });
 

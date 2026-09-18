@@ -119,6 +119,35 @@ export function buildStoreCardsByEntity(ratings, searchResults, fallbackTitle = 
     // "普里斯特利"词条，之后查证命中就答非所问）。宁可不入库，不可入错库。
     const ent = String(rt2.entity || '').trim();
     if (!ent) return;
+    // 诗句原文断言：value 直接取断言原句，**不走摘要挑句**——挑句会把译文/
+    // 表格残留混进词条（实测"译文 朝阳照在…"被当原文存储），且同一诗句的
+    // 不同页面表述会被 merge 判定为"新事实"，导致重复查证时反复合并入库。
+    if (rt2.metric === '原文' || rt2.quoteClaim) {
+      const verse = String(rt2.claim || '').trim();
+      if (verse.length >= 6) {
+        if (!byEntity.has(ent)) byEntity.set(ent, { facts: [], refs: [] });
+        const bucket = byEntity.get(ent);
+        bucket.facts.push({
+          key: `fact_${bucket.facts.length}`,
+          label: '原文',
+          value: verse,
+          metric: '原文',
+          time: rt2.time || '',
+          rating: 'high',
+          source: {
+            name: src.name || src.title || '',
+            url: src.url,
+            official_tag: !!src.official_tag,
+            official_score: src.official_score || 0,
+          },
+          verified_at: new Date().toISOString().slice(0, 10),
+        });
+        for (const r of results) {
+          bucket.refs.push({ name: r.title, url: r.url, official_score: r.official_score || 0 });
+        }
+      }
+      return;
+    }
     const built = storeFactsOf({
       metric: rt2.metric || '',
       entity: ent,

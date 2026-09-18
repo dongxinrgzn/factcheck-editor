@@ -2,6 +2,7 @@
 
 import { cacheGet, cacheSet, cacheDelete, kbCacheKey, KB_CACHE_TTL, clearKBCache } from './cache.js';
 import { isDuplicateFact, classifyProp, splitMultiAttrClauses, makeDataRe, isCitableSource } from './attrClassify.js';
+import { isPoetryCorpusSite } from './officialScore.js';
 
 /**
  * 生成词条主键
@@ -439,12 +440,16 @@ export function autoAudit(card) {
   // 也不再有资格走这条路进库。
   const authoritativeRe = isAncient
     ? /wikipedia\.org|baike\.baidu\.com|ctext\.org|gushiwen\.cn/i
-    : /wikipedia\.org|baike\.baidu\.com/i;
+    : /wikipedia\.org|wikisource\.org|baike\.baidu\.com/i;
   const hasAuthoritative = card.facts.some(f =>
     f.source && (
       f.source.official_tag ||
       f.source.quote_match ||
-      authoritativeRe.test(f.source.url || '')
+      authoritativeRe.test(f.source.url || '') ||
+      // 诗词语料站（古诗文网/诗词库/维基文库等）：诗词原文一致性已由
+      // "原文比对判高"把关，收录页作为出处可采信（与"教辅≠课本"口径的
+      // 区分见 officialScore.isPoetryCorpusSite 注释）
+      (f.source.url && isPoetryCorpusSite(f.source.url) && card.facts.some(x => x.metric === '原文' || /原文|诗句/.test(x.label || '')))
     )
   );
   if (!hasAuthoritative) {

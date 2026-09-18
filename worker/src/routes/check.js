@@ -182,7 +182,11 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     // 全网检索**（KB 优先），而词条证据在按实体过相关性闸门时被剔除 → 该条只能判
     // "查无实据"，其实网上有充分证据。判据：词条名/别名与实体互含，或二元组重合 ≥2
     //（"约瑟夫·普里斯特利" ↔ "普里斯特利" 覆盖 4 个二元组）。
-    if (entity) {
+    // 诗句原文断言：跳过 entity 闸门——它的命中依据是**value 文本本身**（诗句唯一性强），
+    // entity 探测失手（LLM 给了作者名/变体名）不应挡住"库里已有这句诗"的命中，
+    // 否则已入库诗句再查会显示"可手动入库"，用户看到重复的入库提示。
+    const isQuoteClaim = String(claim.metric || '') === '原文' || !!claim.quoteClaim;
+    if (entity && !isQuoteClaim) {
       const names = [card.title, ...(Array.isArray(card.aliases) ? card.aliases : [])]
         .map(x => String(x || '').trim()).filter(Boolean);
       const sameEntity = names.some(n => n === entity || n.includes(entity) || entity.includes(n))
@@ -206,7 +210,16 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
       return lbl && word.length >= 2 && (lbl.includes(word) || word.includes(lbl));
     };
     let matched = [];
-    if (attrWords.length > 0) {
+    if (isQuoteClaim && claimText) {
+      // 诗句原文断言：value 与断言句归一后互含即命中（问"日照澄洲江雾开"，
+      // 库里有同句/含此句的诗文事实）
+      const stripPunc = (x) => String(x || '').replace(/[\s，。；、·,.;:!?！"“”'’‘()（）【】\[\]]/g, '');
+      const sc = stripPunc(claimText);
+      matched = facts.filter(f => {
+        const fv = stripPunc(f.value || '');
+        return fv.length >= 4 && sc.length >= 4 && (fv === sc || fv.includes(sc) || sc.includes(fv));
+      });
+    } else if (attrWords.length > 0) {
       const labelWords = [];
       for (const w of attrWords) {
         labelWords.push(w);
@@ -1300,6 +1313,13 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         try {
           const claimText = String(c.claim || '').trim();
           if (claimText.length >= 6) {
+            // 先查 KB：库里已有这句诗 → 直接以知识库作答（fromKB），
+            // 否则已入库诗句再查会走入库显示 auto（应显示"知识库已有"）。
+            let vkb = null;
+            try { vkb = await lookupKBForClaim(env, c, entity2); } catch { vkb = null; }
+            if (vkb) {
+              return { claim: c, query: buildSearchQuery(c), results: vkb.results, kb: vkb.info, fromKB: true };
+            }
             claimBudgetLeft -= 2; // 诗句比对：1~2 次检索（Tavily→Serper 兜底），计入预算
             const vq = (c.searchHint && c.searchHint.trim()) || `${entity2 || ''} ${claimText}`.trim();
             let vres = [];

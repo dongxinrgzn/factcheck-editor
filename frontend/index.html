@@ -279,6 +279,7 @@ body {
     <input type="text" id="cfg-key" placeholder="Worker Key 或 sk-...">
     <button id="btn-save-cfg">保存配置</button>
     <button id="btn-test">测试连通</button>
+    <button id="btn-clear-cache" title="清空检索/知识库缓存（需管理员密钥）。改了后端功能后测试前先点它，否则命中的是旧缓存结果。">清缓存</button>
   </div>
 </div>
 
@@ -375,6 +376,23 @@ body {
       alert('连接错误：' + e.message);
     }
     $('btn-test').textContent = '测试连通';
+  };
+
+  // 清缓存（开发测试用）：改了后端功能部署后，先点它清掉检索/知识库缓存再测，
+  // 否则命中的是旧结果（古文缓存 90 天、检索缓存 30 天）。需管理员/审核员密钥。
+  $('btn-clear-cache').onclick = async function() {
+    if (!state.baseUrl) { alert('请先填后端地址'); return; }
+    $('btn-clear-cache').textContent = '清除中...';
+    try {
+      var r = await apiFetch('/api/kb/submit', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'clear_cache', type: 'all' })
+      });
+      alert('缓存已清除\n检索缓存：' + (r.searchCache ? r.searchCache.cleared : 0) + ' 条\n知识库缓存：' + (r.kbCache ? r.kbCache.cleared : 0) + ' 条');
+    } catch (e) {
+      alert('清缓存失败：' + e.message + '\n（需要管理员密钥：顶栏填 Worker Key 后保存再试）');
+    }
+    $('btn-clear-cache').textContent = '清缓存';
   };
 
   // 模式切换（query 查询 / check 查证）

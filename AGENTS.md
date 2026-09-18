@@ -96,14 +96,18 @@ Zone 路由权限导致的**路由查询**失败，路由已绑定时不影响�
 - **KV 是最终一致**：写入后几十秒内跨节点可能读不到；**删除同样要等传播**（约 60s）。
   验「写入→读取」闭环时要等一会儿，别误判成代码 bug。
 
-当前 Secret（4 个，值只能在各服务商后台重新获取，Cloudflare **不允许读回**）：
-`SILICONFLOW_KEY` · `TAVILY_KEY` · `WORKER_KEY`（管理员密钥）· `KB_CURATOR_PASSWORD`
+当前 Secret（5 个，值只能在各服务商后台重新获取，Cloudflare **不允许读回**）：
+`SILICONFLOW_KEY` · `TAVILY_KEY` · `SERPER_KEY`（谷歌搜索，注册送 2500 次）· `WORKER_KEY`（管理员密钥）· `KB_CURATOR_PASSWORD`
 
 ---
 
 ## 5. 检索链路
 
-**主链路 = 维基百科 → Tavily。** Bing 抓取与 DDG/SearXNG 都已废弃并从代码中删除。
+**主链路 = 维基百科 → Tavily → Serper 兜底。** Bing 抓取与 DDG/SearXNG 都已废弃并从代码中删除。
+
+- **Serper**（`brave.js` 的 `serperSearch`）：Tavily 两级额度**都**拿不到结果时的发现层兜底，
+  额度池独立（2500 次）。只在前者都空时才消耗，保护寿命。返回 organic title/link/snippet，
+  官网召回率高（实测直接返回 forestry.gov.cn 页面）。额度尽返回 403/429，吞掉返回空不拖垮链路。
 
 - 三路检索**必须并行**（主检索 + 属性补齐 + 官方站直抓），串行要 16–18s，并行 8–10s。
 - `filterRelevant(results, entity, opts)` 是相关性闸门：单字实体从严；过滤为空**不覆盖**原结果。

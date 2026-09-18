@@ -53,6 +53,7 @@ export async function handleSearch(request, env) {
     try {
       const searxResults = await braveSearch({
         query, preferOfficial: true, topK: top_k, whitelist,
+        tavilyApiKey: env.TAVILY_KEY, serperApiKey: env.SERPER_KEY,
       });
       // 官方真实结果优先排前（最多 3 条，防低相关 gov 噪音淹没维基等来源），维基/其他来源其后
       results = [...govResults.slice(0, 3), ...searxResults];

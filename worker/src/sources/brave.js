@@ -696,6 +696,36 @@ export async function tavilySearch(query, opts = {}) {
            capUntil: keylessCapUntil ? new Date(keylessCapUntil).toISOString() : '' };
 }
 
+// ---------- Serper（谷歌搜索结果，注册送 2500 次，池独立于 Tavily）----------
+// 定位：Tavily 两级额度（Key 432 + keyless 撞限）**都**拿不到结果时的发现层兜底。
+// 返回 organic[].{title,link,snippet}——无网页正文、snippet 较短，但官网召回率高
+// （实测"大熊猫 体重"直接召回 forestry.gov.cn 国家林草局页面），契合校次场景
+// 对官方数据的需求。额度尽返回 403/429：吞掉返回空，不拖垮链路（同 tavily 风格）。
+export async function serperSearch(query, opts = {}) {
+  const { apiKey, topK = 8 } = opts;
+  if (!apiKey || !query) return { results: [], mode: 'none' };
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    const resp = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
+      body: JSON.stringify({ q: query, num: topK }),
+    });
+    clearTimeout(t);
+    if (!resp.ok) return { results: [], mode: 'serper', status: resp.status };
+    const j = await resp.json().catch(() => null);
+    const organic = (j && Array.isArray(j.organic)) ? j.organic : [];
+    const results = organic
+      .filter(r => r && r.link)
+      .map(r => ({ title: r.title || '', url: r.link, snippet: r.snippet || '', source: 'serper' }));
+    return { results, mode: 'serper' };
+  } catch {
+    return { results: [], mode: 'serper' };
+  }
+}
+
 // ---------- SearXNG site: 官方域名检索（聚合多实例，JSON 稳定，官方主通道） ----------
 export async function searxSiteSearch(domain, query, topK = 6) {
   const q = `site:${domain} ${query}`;
@@ -800,7 +830,7 @@ export async function braveSearch(opts = {}) {
   // 查证链路传 'advanced'——教材原句这类长句检索，advanced 对自然语言的理解
   // 明显更好（实测同一句子 basic 召回人物传记，advanced 能直接召回原题页）。
   // alwaysTavily：即使维基有结果也照样查 Tavily（见下方注释）
-  const { query, topK = 5, hint = '', tavilyApiKey, diversify = true, tavilyDepth = 'basic', alwaysTavily = false } = opts;
+  const { query, topK = 5, hint = '', tavilyApiKey, serperApiKey, diversify = true, tavilyDepth = 'basic', alwaysTavily = false } = opts;
   if (!query) return [];
 
   // 1. 维基（权威来源 + 深度抽取属性数据句）
@@ -834,7 +864,23 @@ export async function braveSearch(opts = {}) {
       }
     } catch {}
   }
-  // 3. Tavily 也没结果（或无 Key 且 keyless 也不通）→ 退回维基
+
+  // 2.5 Serper 兜底：Tavily 两级额度（Key 432 + keyless 撞限）都拿不到结果时，
+  // 用独立额度池的 Serper（谷歌索引）当发现层。只在前者都空时才消耗，保护 2500 次寿命。
+  if (serperApiKey) {
+    try {
+      const sp = await serperSearch(query, { apiKey: serperApiKey, topK });
+      if (sp.results.length > 0) {
+        if (wiki.length > 0) {
+          const seen = new Set(wiki.map(r => r.url));
+          return dedupe([...wiki, ...sp.results.filter(r => !seen.has(r.url))]).slice(0, topK);
+        }
+        return sp.results.slice(0, topK);
+      }
+    } catch {}
+  }
+
+  // 3. Tavily/Serper 也没结果（或无 Key 且 keyless 也不通）→ 退回维基
   if (wiki.length > 0) return dedupe([...wiki]).slice(0, topK);
   return [];
 }

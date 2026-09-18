@@ -722,7 +722,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
       // 这轮负责把真正的数据段落捞回来；并行发起避免把耗时叠加成串行。
       const attrQuery = hint ? expandQueryWithAttrSynonyms(`${entity || ''} ${hint}`.trim(), hint) : '';
       const [raw, attrExtra] = await Promise.all([
-        braveSearch({ query: searchQuery, preferOfficial: true, topK: 8, whitelist, hint, tavilyApiKey: env.TAVILY_KEY }),
+        braveSearch({ query: searchQuery, preferOfficial: true, topK: 8, whitelist, hint, tavilyApiKey: env.TAVILY_KEY, serperApiKey: env.SERPER_KEY }),
         (attrQuery && env.TAVILY_KEY)
           ? tavilySearch(attrQuery, { apiKey: env.TAVILY_KEY, topK: 6, searchDepth: 'basic' })
               .catch(() => ({ results: [], answer: '' }))
@@ -1075,7 +1075,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
             query: q,
             preferOfficial: false,
             topK: 6,
-            tavilyApiKey: env.TAVILY_KEY,
+            tavilyApiKey: env.TAVILY_KEY, serperApiKey: env.SERPER_KEY,
             diversify: true,
             tavilyDepth: 'advanced',
             alwaysTavily: true,
@@ -1226,7 +1226,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         // 必须传 tavilyApiKey：braveSearch 在维基命中时会短路，结果常清一色
         // zh.wikipedia.org。diversifyDomains 需要 Tavily 才能补出第二个域名，
         // 否则自动入库门槛②（≥2 域名）永远过不了。
-        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 6, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: !skipSearchFallback, tavilyDepth: 'advanced' });
+        let raw = await braveSearch({ query: sq, preferOfficial: true, topK: 6, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, serperApiKey: env.SERPER_KEY, diversify: !skipSearchFallback, tavilyDepth: 'advanced' });
         // 以下兜底会额外消耗子请求额度（Cloudflare 单次调用上限 50）。
         // 古文查证等复合流程调用时置 skipSearchFallback，避免超限整体失败。
         if (!skipSearchFallback) {
@@ -1263,7 +1263,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
               : raw;
             if (relNow.length < 2) {
               try {
-                const raw2 = await braveSearch({ query: sq2, preferOfficial: true, topK: 5, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, diversify: false, tavilyDepth: 'basic' });
+                const raw2 = await braveSearch({ query: sq2, preferOfficial: true, topK: 5, whitelist, hint: hint2, tavilyApiKey: env.TAVILY_KEY, serperApiKey: env.SERPER_KEY, diversify: false, tavilyDepth: 'basic' });
                 const seen = new Set(raw.map(r => r.url));
                 for (const r of raw2) {
                   if (r?.url && !seen.has(r.url)) { raw.push(r); seen.add(r.url); }

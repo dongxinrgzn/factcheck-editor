@@ -1,4 +1,6 @@
 // 古诗文网 gushiwen.cn 检索
+// ⚠️ 2026-09 实测：search.aspx 已强制登录（302 → user/login.aspx），本通道实际已失效，
+// 保留代码备将来登录态方案；诗词兜底已改走 verifyAncient 的全网检索（edition=web）。
 
 const GUSHIWEN_BASE = 'https://www.gushiwen.cn';
 

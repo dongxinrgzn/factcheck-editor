@@ -7,6 +7,7 @@ import { cacheGet, cacheSet, ancientCacheKey, ANCIENT_TTL } from '../utils/cache
 import { searchText, searchClassic, CLASSIC_TEXTS } from '../sources/ctext.js';
 import { searchZdic } from '../sources/zdic.js';
 import { searchGushiwen, extractPoemQuery } from '../sources/gushiwen.js';
+import { tavilySearch, serperSearch } from '../sources/brave.js';
 import { lookupPoem } from '../sources/poetryDb.js';
 import { segmentAndExtract, scoreMatches, clusterByEdition, isAllLowConfidence, isMathCategory, getMathUrnPrefixes } from '../utils/ancientMatcher.js';
 import { buildSegmentMessages, buildMathExtractMessages } from '../prompts/matchAncient.js';
@@ -138,6 +139,31 @@ export async function handleVerifyAncient(request, env) {
         book: r.title, chapter: '', urn: '', url: r.url, text: r.snippet, edition: 'gushiwen',
       })));
     } catch {}
+  }
+  // 5.5 诗词全网兜底：古诗文网搜索已强制登录（2026-09 实测 302→login.aspx），
+  //     内置诗词库只覆盖选本 ~950 篇，组诗单首（如《浪淘沙·其六》）常不在选本里。
+  //     两级都空时用 Tavily/Serper 检索"作品名+首句"——诗词赏析页的摘要
+  //     普遍含全诗原文，交由 scoreMatches 打相似度即可判出原文一致性。
+  //     权威性按来源分档另计（edition=web 仅作参考出处），不冒充古籍底本。
+  if (allMatches.length === 0 && poemLike) {
+    try {
+      const poemName = extractPoemQuery(text);
+      const firstVerse = String(text).split(/[，,。.；;：:！!？?"'\n]/).map(x => x.trim())
+        .find(x => x.length >= 5 && !x.includes('《'));
+      const q = [poemName, firstVerse].filter(Boolean).join(' ');
+      let web = [];
+      if (env.TAVILY_KEY) {
+        const t = await tavilySearch(q, { apiKey: env.TAVILY_KEY, topK: 5, searchDepth: 'basic' });
+        web = (t.results || []).filter(r => r && r.url && r.snippet);
+      }
+      if (!web.length && env.SERPER_KEY) {
+        const s = await serperSearch(q, { apiKey: env.SERPER_KEY, topK: 5 });
+        web = (s.results || []).filter(r => r && r.url && r.snippet);
+      }
+      allMatches.push(...web.map(r => ({
+        book: r.title, chapter: '', urn: '', url: r.url, text: r.snippet, edition: 'web',
+      })));
+    } catch { /* 全网兜底失败不阻塞 */ }
   }
   if (allMatches.length === 0 && !poemLike) {
     try {

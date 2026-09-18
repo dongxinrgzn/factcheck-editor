@@ -388,7 +388,7 @@ body {
         method: 'POST',
         body: JSON.stringify({ action: 'clear_cache', type: 'all' })
       });
-      alert('缓存已清除\n检索缓存：' + (r.searchCache ? r.searchCache.cleared : 0) + ' 条\n知识库缓存：' + (r.kbCache ? r.kbCache.cleared : 0) + ' 条');
+      alert('缓存已清除\n检索缓存：' + (r.searchCache ? r.searchCache.cleared : 0) + ' 条\n知识库缓存：' + (r.kbCache ? r.kbCache.cleared : 0) + ' 条\n\n注：每次查询/查证都会产生新缓存（设计行为）。若刚测试过，再点会清出测试产生的那批，属正常。');
     } catch (e) {
       alert('清缓存失败：' + e.message + '\n（需要管理员密钥：顶栏填 Worker Key 后保存再试）');
     }

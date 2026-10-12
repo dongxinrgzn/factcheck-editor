@@ -48,6 +48,12 @@ export async function callLLM(opts) {
   if (jsonMode) {
     body.response_format = { type: 'json_object' };
   }
+  // 豆包系列默认启用深度思考（reasoning），一次调用多耗 400+ 推理 token、
+  // 10 秒以上。事实核查场景不需要长链推理（prompt 已给出明确判断规则），
+  // 禁用后实测 12s → 2.2s。非豆包 provider 忽略此参数。
+  if (_baseUrl.includes('volces.com')) {
+    body.thinking = { type: 'disabled' };
+  }
 
   const fn = async () => {
     const resp = await fetch(_baseUrl, {

@@ -1,6 +1,7 @@
 // Cloudflare Worker 入口 + fetch 路由分发
 
 import { handlePreflight, withCors, jsonResponse, errorJson } from './utils/cors.js';
+import { initLLMProxy } from './utils/llmProxy.js';
 import { handleAuth } from './routes/auth.js';
 import { handleCheck } from './routes/check.js';
 import { handleSearch } from './routes/search.js';
@@ -26,6 +27,9 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
+
+    // 初始化 LLM Provider（env.LLM_BASE_URL 有值时切换到豆包等，否则保持 SiliconFlow）
+    initLLMProxy(env);
 
     // CORS 预检
     if (method === 'OPTIONS') {

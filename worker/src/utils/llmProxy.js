@@ -1,19 +1,36 @@
-// SiliconFlow LLM 调用代理（Qwen2.5-72B）
+// LLM 调用代理（支持 SiliconFlow / 豆包等 OpenAI 兼容格式）
+// Provider 由 env 控制：LLM_BASE_URL + LLM_MODEL + LLM_API_KEY（见 initLLMProxy）
 
 import { cleanLLMJson, cleanLLMText } from './cleanLLM.js';
 import { withRetry } from './rateLimiter.js';
 
 const SILICONFLOW_URL = 'https://api.siliconflow.cn/v1/chat/completions';
 
+// 模块级配置（由 initLLMProxy 在每次请求入口初始化，Isolate 内生效）
+let _baseUrl = SILICONFLOW_URL;
+let _defaultModel = 'Qwen/Qwen2.5-72B-Instruct';
+let _defaultApiKeyEnv = 'SILICONFLOW_KEY';
+
 /**
- * 调用 SiliconFlow LLM
+ * 初始化 LLM Provider（在 index.js 的 fetch handler 开头调用）
+ * env.LLM_BASE_URL 有值时切换 provider（如豆包 ark.cn-beijing.volces.com），
+ * 未设置时保持 SiliconFlow 默认值——不影响现有部署。
+ */
+export function initLLMProxy(env) {
+  _baseUrl = env.LLM_BASE_URL || SILICONFLOW_URL;
+  _defaultModel = env.LLM_MODEL || 'Qwen/Qwen2.5-72B-Instruct';
+  _defaultApiKeyEnv = env.LLM_BASE_URL ? 'LLM_API_KEY' : 'SILICONFLOW_KEY';
+}
+
+/**
+ * 调用 LLM
  * @param {Object} opts - {messages, model, temperature, max_tokens, json_mode, apiKey}
  * @returns {string} LLM 返回的文本
  */
 export async function callLLM(opts) {
   const {
     messages,
-    model = 'Qwen/Qwen2.5-72B-Instruct',
+    model = _defaultModel,
     temperature = 0.3,
     maxTokens = 2048,
     jsonMode = false,
@@ -33,7 +50,7 @@ export async function callLLM(opts) {
   }
 
   const fn = async () => {
-    const resp = await fetch(SILICONFLOW_URL, {
+    const resp = await fetch(_baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -72,16 +89,22 @@ export async function callLLMText(opts) {
 
 /**
  * 选择有效 API Key（三档权限逻辑）
- * - 用户自带 sk- 开头 → 用用户的
- * - 管理员密码匹配 → 用环境变量
- * - 都没有 → 返回 null（陌生人模式，走兜底限流）
+ * - 用户自带 sk- 开头 → 用用户的（SiliconFlow 格式）
+ * - 管理员密码匹配 → 用环境变量（LLM_API_KEY 或 SILICONFLOW_KEY）
+ * - 都没有 → 返回环境 Key（陌生人模式，走兜底限流）
+ *
+ * provider 切换时（LLM_BASE_URL 设置了豆包等），admin/guest 走 LLM_API_KEY；
+ * 未设置时保持 SILICONFLOW_KEY 不变——不影响现有部署。
  */
 export function resolveApiKey(userKey, env) {
   if (userKey && userKey.startsWith('sk-')) {
     return { apiKey: userKey, role: 'user', unlimited: true };
   }
+  const envKey = _defaultApiKeyEnv === 'LLM_API_KEY'
+    ? (env.LLM_API_KEY || env.SILICONFLOW_KEY)
+    : env.SILICONFLOW_KEY;
   if (env.WORKER_KEY && userKey === env.WORKER_KEY) {
-    return { apiKey: env.SILICONFLOW_KEY, role: 'admin', unlimited: true };
+    return { apiKey: envKey, role: 'admin', unlimited: true };
   }
-  return { apiKey: env.SILICONFLOW_KEY, role: 'guest', unlimited: false };
+  return { apiKey: envKey, role: 'guest', unlimited: false };
 }

@@ -41,8 +41,9 @@ id = "112efd0ff26c40c08b008fb602047f15"
 crons = ["0 19 * * *"]
 
 [vars]
-LLM_PROVIDER = "siliconflow"
-LLM_MODEL = "Qwen/Qwen2.5-72B-Instruct"
+LLM_PROVIDER = "doubao"
+LLM_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+LLM_MODEL = "ep-20260821144235-4nq49"
 CTEXT_RATE_LIMIT_MS = "1100"
 FALLBACK_PER_IP_DAILY_LIMIT = "3"
 OFFICIAL_WHITELIST = '["stats.gov.cn","data.stats.gov.cn","nfga.gov.cn","moe.gov.cn","gov.cn","openstd.samr.gov.cn","baike.baidu.com","zh.wikipedia.org"]'

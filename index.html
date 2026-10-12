@@ -174,6 +174,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
   var $ = function(id) { return document.getElementById(id); };
 
   // ==================== 工具 ====================
+
+  /** 判断是否为国内无法直接访问的站点，返回镜像链接（如有） */
+  function mirrorLink(url) {
+    if (!url) return null;
+    // 维基百科 → Wikiwand 镜像（国内可访问）
+    var m = url.match(/^https?:\/\/([a-z]+)\.wikipedia\.org\/wiki\/(.+)$/);
+    if (m) return 'https://www.wikiwand.com/' + m[1] + '/articles/' + m[2];
+    // 维基文库 → 无稳定镜像，标注即可
+    if (/wikisource\.org/.test(url)) return 'BLOCKED';
+    return null;
+  }
+
+  /** 生成来源链接 HTML（国外站自动附镜像/提示） */
+  function sourceLinkHtml(url, title) {
+    if (!url) return '';
+    var mirror = mirrorLink(url);
+    var html = '<a href="' + escapeHtml(url) + '" target="_blank" style="color:#0366d6;text-decoration:underline;">' + escapeHtml(title || '查看原文') + ' ↗</a>';
+    if (mirror === 'BLOCKED') {
+      html += ' <span style="font-size:11px;color:#d73a49;" title="该站点在国内网络环境下可能无法直接访问">⚠ 需科学上网</span>';
+    } else if (mirror) {
+      html += ' <a href="' + escapeHtml(mirror) + '" target="_blank" style="font-size:11px;color:#28a745;text-decoration:underline;" title="国内可访问的镜像站点">镜像 ↗</a>';
+    }
+    return html;
+  }
+
   function escapeHtml(s) {
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, function(c) {
@@ -285,11 +310,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
       var tag = r.official_tag
         ? '<span class="tag-official">★官方</span>'
         : '<span class="tag-unofficial">待甄别</span>';
-      var site = r.site_name ? '<span style="color:#0a7d32;font-size:12px;font-weight:600;">[' + escapeHtml(r.site_name) + ']</span>' : '';
+      var site = r.site_name ? '<span style="color:#0a7d32;font-size:12px;font-weight:600;margin-right:6px;">[' + escapeHtml(r.site_name) + ']</span>' : '';
       var snippet = (r.snippet || '').slice(0, 200);
+      var mirror = mirrorLink(r.url);
+      var mirrorHtml = mirror && mirror !== 'BLOCKED'
+        ? ' <a href="' + escapeHtml(mirror) + '" target="_blank" style="font-size:11px;color:#28a745;text-decoration:underline;">镜像 ↗</a>'
+        : (mirror === 'BLOCKED' ? ' <span style="font-size:11px;color:#d73a49;">⚠ 需科学上网</span>' : '');
       return '<div class="result-item">' +
         '<div class="title">' + tag + site +
-        '<a href="' + escapeHtml(r.url || '#') + '" target="_blank">' + escapeHtml(r.title || '(无标题)') + ' ↗</a></div>' +
+        '<a href="' + escapeHtml(r.url || '#') + '" target="_blank">' + escapeHtml(r.title || '(无标题)') + ' ↗</a>' + mirrorHtml + '</div>' +
         '<div class="snippet">' + escapeHtml(snippet) + '</div></div>';
     }).join('');
   }
@@ -400,13 +429,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
       if (r.correction) {
         html += '<div class="correction-box"><strong>纠错建议：</strong>' + escapeHtml(r.correction) + '</div>';
       }
-      // 来源链接（独立一行，清晰可点击）
+      // 来源链接（独立一行，清晰可点击；国外站自动附镜像）
       if (r.sources && r.sources.length > 0) {
         html += '<div class="sources" style="margin-top:8px;padding-top:6px;border-top:1px dashed #e1e4e8;font-size:12px;">';
         html += '<span style="color:#6a737d;">证据来源：</span> ';
         r.sources.slice(0, 4).forEach(function(s, si) {
           if (s.url) {
-            html += '<a href="' + escapeHtml(s.url) + '" target="_blank" style="display:inline-block;margin:2px 8px 2px 0;color:#0366d6;text-decoration:underline;">' + (si + 1) + '. ' + escapeHtml((s.title || '查看原文').slice(0, 35)) + ' ↗</a>';
+            html += '<span style="display:inline-block;margin:2px 8px 2px 0;">' + (si + 1) + '. ' + sourceLinkHtml(s.url, (s.title || '查看原文').slice(0, 35)) + '</span>';
           }
         });
         html += '</div>';

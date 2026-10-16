@@ -211,13 +211,18 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
     };
     let matched = [];
     if (isQuoteClaim && claimText) {
-      // 诗句原文断言：value 与断言句归一后互含即命中（问"日照澄洲江雾开"，
-      // 库里有同句/含此句的诗文事实）
+      // 诗句原文断言：value 与断言句归一后互含即命中。
+      // 描述性断言（"《浪淘沙·其六》的原文包含诗句尽是沙中浪底来"）不满足互含，
+      // 但包含事实值（诗句文本）的尾部——追加尾部 5 字匹配兜底。
       const stripPunc = (x) => String(x || '').replace(/[\s，。；、·,.;:!?！"“”'’‘()（）【】\[\]]/g, '');
       const sc = stripPunc(claimText);
       matched = facts.filter(f => {
         const fv = stripPunc(f.value || '');
-        return fv.length >= 4 && sc.length >= 4 && (fv === sc || fv.includes(sc) || sc.includes(fv));
+        if (fv.length < 4 || sc.length < 4) return false;
+        if (fv === sc || fv.includes(sc) || sc.includes(fv)) return true;
+        const tail = fv.slice(-5);
+        if (tail.length >= 4 && sc.includes(tail)) return true;
+        return false;
       });
     } else if (attrWords.length > 0) {
       const labelWords = [];
@@ -235,9 +240,12 @@ export async function lookupKBForClaim(env, claim, entity, hint, opts = {}) {
       for (const f of valMatched) if (!matched.includes(f)) matched.push(f);
     }
     if (matched.length === 0 && claimText) {
+      // ⚠️ 标签至少 2 字才参与此回退：单字标签（如"金"）会匹配任何含该字的断言
+      //（"金的质地柔软"含"金"→ 命中了不相关的熔点/化学性质事实→ 评级 LLM 正确判低，
+      // 但用户看到"来源：知识库"却得低分，困惑且误导）
       matched = facts.filter(f => {
         const lbl = (f.label || '').trim();
-        return lbl && (claimText.includes(lbl) || lbl.includes(claimText));
+        return lbl && lbl.length >= 2 && (claimText.includes(lbl) || lbl.includes(claimText));
       });
     }
     if (matched.length === 0 && nums.length > 0) {
@@ -547,11 +555,34 @@ function appendQuoteClaims(text, claims) {
       for (const clauseRaw of quote.split(/[。！？；]/)) {
         const clause = clauseRaw.replace(/\s+/g, '').replace(/^[，,、]+|[，,、]+$/g, '');
         if (clause.length < 6) continue;
-        const covered = out.some(c => {
+        // ⚠️ 不能用 some()——短路返回会漏标记同联其它断言。
+        // 还要检查子句级包含：LLM 可能把诗句抽成描述性断言
+        //（"《浪淘沙·其六》的原文包含诗句尽是沙中浪底来"），
+        // 完整联句的 norm 互含检查失败，但子句"尽是沙中浪底来"包含于其中。
+        let covered = false;
+        const subClauses = clause.split(/[，,、]/).map(s => s.trim()).filter(s => s.length >= 4);
+        for (const c of out) {
           const cc = norm(c.claim);
           const nn = norm(clause);
-          return !cc || !nn || cc.includes(nn) || nn.includes(cc);
-        });
+          if (!cc || !nn) continue;
+          if (cc.includes(nn) || nn.includes(cc)) {
+            covered = true;
+            if (nn.length >= 4) {
+              c.quoteClaim = true;
+              if (title && c.entity !== title) c.entity = title;
+            }
+            continue;
+          }
+          for (const sub of subClauses) {
+            const ns = norm(sub);
+            if (ns.length >= 4 && cc.includes(ns)) {
+              covered = true;
+              c.quoteClaim = true;
+              if (title && c.entity !== title) c.entity = title;
+              break;
+            }
+          }
+        }
         if (covered) continue;
         out.push({
           claim: clause,
@@ -1290,10 +1321,12 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
         }
       }
       // ---- 子请求预算闸门（必须在 KB 查/诗句比对/独立检索**之前**）----
-      // KB 查（2~4 个 KV get）、检索、评级都占 Cloudflare 免费版 50 上限，
-      // 闸门放晚了这些消耗已花掉（实测第 5、6 条断言评级因此爆 1102）。
+      // KB 查（2~4 个 KV get）、检索、评级都占 Cloudflare 免费版 50 上限。
       // 归零后断言不独立检索，复用主检索结果照常评级，保证每条都有结果。
-      if (claimBudgetLeft <= 0) {
+      // ⚠️ 诗句断言（quoteClaim/metric=原文）跳过闸门：KB 命中只需 2~3 个 KV 读，
+      // 不消耗检索额度；闸门拦住会导致已入库诗句（第 5 条起）无法命中 KB。
+      const _isQC = c.metric === '原文' || c.quoteClaim;
+      if (!_isQC && claimBudgetLeft <= 0) {
         const reused = (entity2 || c.claim || '')
           ? filterRelevant(Array.isArray(searchResults) ? searchResults : [], entity2 || c.claim, { strictName: true, claimText: c.claim }).slice(0, 6)
           : (Array.isArray(searchResults) ? searchResults.slice(0, 6) : []);
@@ -1302,7 +1335,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           results: reused, fromKB: false, budgetCapped: true,
         };
       }
-      claimBudgetLeft -= CLAIM_BUDGET_COST;
+      if (!_isQC) claimBudgetLeft -= CLAIM_BUDGET_COST;
 
       // ---- 诗句原文断言：针对性原文比对（不依赖整段命中）----
       // 整段检索时好时坏（本轮未命中时诗句断言会落回通用 LLM 评级——证据匹配难，

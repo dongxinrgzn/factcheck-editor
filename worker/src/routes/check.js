@@ -7,6 +7,7 @@ import { cacheGet, cacheSet, cacheDelete, searchCacheKey, SEARCH_TTL, ratingCach
 import { annotateResults, sourceTier, isAuthoritativeTextSource, isPoetryCorpusSite } from '../utils/officialScore.js';
 import { braveSearch, braveSearchForce, tavilySearch, filterRelevant, entityTermOf } from '../sources/brave.js';
 import { searchGovDirect } from '../sources/govDirect.js';
+import { checkTextbookIndex, textbookToWholeMatch } from '../utils/textbookIndex.js';
 import { buildExtractFactsMessages } from '../prompts/extractFacts.js';
 import { buildRateTruthMessages } from '../prompts/rateTruth.js';
 import { queryEntry, autoStoreCard } from '../utils/kbStore.js';
@@ -1172,6 +1173,31 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     const ptext = String(text || '').replace(/\s+/g, ' ').trim();
     // 太短信息量不足、太长（文章级）整段检索召不回原文，两种情况都不做整段核查
     if (ptext.length >= 20 && ptext.length <= 400) {
+      // ---- 0. 教材索引直查（最高优先级，优先于全网检索）----
+      // 索引由 scripts/index-textbooks.py 构建（教材库 PDF → 分句 → KV 逐句存储）
+      // 命中即整段按"高"采信：教材原文 = textbook 档 = 最高权威
+      try {
+        const tbResult = await checkTextbookIndex(env.FACT_CACHE, ptext);
+        if (tbResult.hit) {
+          const tbMatch = textbookToWholeMatch(tbResult);
+          if (tbMatch) {
+            wholeMatch = tbMatch;
+            wholeResults = [{
+              title: tbMatch.title,
+              url: '',
+              snippet: tbMatch.snippet,
+              source: 'textbook',
+              official_tag: true,
+              official_score: 1.0,
+              quote_match: true,
+              quote_coverage: tbMatch.coverage,
+            }];
+          }
+        }
+      } catch { /* 教材索引查询失败不阻塞 */ }
+
+      // 教材未命中 → 走原有全网整段检索
+      if (!wholeMatch) {
       // 多形态整段检索：原文 + 去中文引号（引号会让部分检索引擎把整串当短语匹配，
       // 召回集明显变窄）。两种形态并行，结果合并去重。
       // ⚠️ 必须走缓存：整段检索是每请求固定成本（2 形态 × advanced = 4 credits，
@@ -1271,6 +1297,7 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
           }
         }
       } catch { /* 整段检索失败 → 照旧逐点核查 */ }
+      } // end if (!wholeMatch) — 教材未命中时走全网整段检索
     }
   }
 

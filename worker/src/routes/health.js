@@ -117,7 +117,36 @@ export async function handleHealth(request, env) {
         : Promise.resolve(probe['brave-search'] = { ok: false, error: 'BRAVE_KEY 未配置（$5/月额度）' }),
     ]);
     data.probe = probe;
-    data.sources = ['wikipedia', 'tavily']; // Bing（2026-09-16 弃用）、DDG/SearXNG（反爬失效）已移出主链路
+    data.sources = ['wikipedia', 'tavily'];
+    // 教材索引调试：/api/health?tb=1
+    if (url.searchParams.get('tb') === '1') {
+      const tb = {};
+      // 测试 KV 写读
+      try {
+        await env.FACT_CACHE.put('_tb_test', 'hello');
+        const tv = await env.FACT_CACHE.get('_tb_test');
+        tb.kv_write_read = tv; // 应为 'hello'
+        await env.FACT_CACHE.delete('_tb_test');
+      } catch (e) { tb.kv_write_read_error = e.message; }
+      try {
+        const dir = await env.FACT_CACHE.get('tb:dir');
+        tb.dir = dir ? dir.substring(0, 100) : null;
+      } catch (e) { tb.dir_error = e.message; }
+      try {
+        const books = await env.FACT_CACHE.get('tb:books');
+        tb.books_readable = !!books;
+        tb.books_size = books ? books.length : 0;
+      } catch (e) { tb.books_error = e.message; }
+      try {
+        const meta = await env.FACT_CACHE.get('tb:subj:化学:_meta');
+        tb.chem_meta = meta ? 'READABLE' : null;
+      } catch (e) { tb.chem_meta_error = e.message; }
+      try {
+        const c0 = await env.FACT_CACHE.get('tb:subj:化学:0');
+        tb.chem_chunk0 = c0 ? `READABLE (${c0.length} chars)` : null;
+      } catch (e) { tb.chem_chunk0_error = e.message; }
+      data.tb_debug = tb;
+    }
     data.fallback_candidates = ['tavily-keyless(免Key，已接入主链路兜底)', 'serper(2500次)', 'exa(1000/月)', 'brave($5/月)', 'jina(已需鉴权)'];
     data.tavily_free_tier = 'Key 侧 1000 credits/月（basic=1、advanced=2 credit/次，每月 1 日重置）超额返回 432；keyless 侧按出口 IP 计**每小时**额度，撞限返回 429 + hourly_cap_reached + Retry-After（实测约 90s），窗口滑过自愈。两级额度独立 → 自动降级';
     // 本 isolate 记录的 keyless 解除时间（撞限后到点前不再打 keyless，避免每条断言白打一次 429）

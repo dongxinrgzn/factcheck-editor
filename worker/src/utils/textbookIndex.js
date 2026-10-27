@@ -1,96 +1,159 @@
-// 教材索引查询（v2 — master 索引单 KV 读取 + Isolate 内存缓存）
-// 索引由 scripts/index-textbooks-v2.py 构建：
-//   tb:master → {prefix_30chars: {b:书名, p:页码, t:原文}, ...}
-//   tb:meta   → {book_count, sentence_count, last_updated, books: [...]}
+// 教材索引查询 v3 — 按学科拆分存储 + Isolate 缓存
+// 索引由 scripts/index-textbooks-full.py 构建：
+//   tb:subj:{学科} → {prefix: {bi:book_id, p:page}}
+//   tb:books       → {book_id: {t:title, s:stage, sub:subject, v:version, g:grade}}
+//   tb:dir         → {学科: entry_count}
 //
-// Worker: 首次请求读 tb:master（~860KB，Isolate 缓存后续 0 KV 读），
-// 用户句子归一化 → 取前 30 字符 → 内存 Map 查找
+// Worker: 先查最可能的相关学科（化学→物理→数学→...），命中即返回
 
-// Isolate 级缓存（同实例内多请求共享，KV 只读一次）
-let _masterCache = null;
-let _masterLoadedAt = 0;
-const MASTER_CACHE_TTL = 5 * 60 * 1000; // 5 分钟后重新加载（教材索引更新后自愈）
+// Isolate 级缓存
+let _dirCache = null;
+let _subjectCaches = {};  // {subject: index}
+let _booksCache = null;
+let _loadedAt = 0;
+const CACHE_TTL = 5 * 60 * 1000;
 
-/**
- * 句子归一化（与 index-textbooks-v2.py 的 norm_sentence 完全一致）
- */
+// 学科查询优先级（校次场景化学最常用）
+const SUBJECT_PRIORITY = ['化学', '物理', '数学', '语文', '生物', '英语', '历史', '地理', '科学', '道法'];
+
 export function normForTextbook(s) {
   return String(s || '')
     .replace(/[，。；、：\u201c\u201d\u2018\u2019（）\[\]【】\s.\-,;:!?！？"'']/g, '');
 }
 
-/**
- * 加载教材主索引（Isolate 缓存）
- */
-async function loadMaster(kv) {
-  if (!kv) return null;
-  const now = Date.now();
-  if (_masterCache && (now - _masterLoadedAt) < MASTER_CACHE_TTL) {
-    return _masterCache;
-  }
+async function kvGetJson(kv, key) {
+  if (!kv || !key) return null;
   try {
-    const raw = await kv.get('tb:master');
+    const raw = await kv.get(key);
     if (!raw) return null;
-    _masterCache = JSON.parse(raw);
-    _masterLoadedAt = now;
-    return _masterCache;
-  } catch {
-    return _masterCache; // 加载失败用旧缓存
+    return JSON.parse(raw);
+  } catch (e) {
+    console.log('[TB-INDEX] kvGetJson error:', key, e.message || String(e).slice(0, 100));
+    return null;
   }
 }
 
-/**
- * 检查一段文本是否包含教材原句
- * @param {KVNamespace} kv - FACT_CACHE
- * @param {string} text - 用户输入
- * @returns {Promise<{hit:boolean, coverage:number, matches:Array}>}
- *   coverage = 命中句子数 / 总有效句子数
- */
-export async function checkTextbookIndex(kv, text) {
-  if (!kv || !text) return { hit: false, coverage: 0, matches: [] };
+async function ensureLoaded(kv) {
+  const now = Date.now();
+  if (_dirCache && (now - _loadedAt) < CACHE_TTL) return true;
+  _dirCache = await kvGetJson(kv, 'tb:dir');
+  if (!_dirCache) return false;
+  _loadedAt = now;
+  _subjectCaches = {};
+  _booksCache = null;
+  return true;
+}
 
-  const master = await loadMaster(kv);
-  if (!master || Object.keys(master).length === 0) {
-    return { hit: false, coverage: 0, matches: [] };
-  }
+async function getSubjectIndex(kv, subject) {
+  if (_subjectCaches[subject]) return _subjectCaches[subject];
 
-  // 分句（与索引侧一致）
-  const sentences = String(text)
-    .replace(/\s+/g, '')
-    .split(/[。；！？!?]+/)
-    .map(s => s.trim())
-    .filter(s => s.length >= 12 && s.length <= 300);
-
-  if (sentences.length === 0) return { hit: false, coverage: 0, matches: [] };
-
-  const matches = [];
-  let checked = 0;
-
-  for (const sent of sentences) {
-    const normed = normForTextbook(sent);
-    if (normed.length < 10) continue;
-    checked++;
-
-    // 双端匹配：首 30 字（从头引用）+ 尾 30 字（容忍头部混入章节标题）
-    const headKey = normed.slice(0, 30);
-    const tailKey = normed.length > 30 ? normed.slice(-30) : normed;
-    const hit = master[headKey] || master[tailKey];
-    if (hit) {
-      matches.push({
-        sentence: sent,
-        book: hit.b || '',
-        page: hit.p || 0,
-        original: hit.t || '',
-      });
+  // 尝试分块格式（tb:subj:{subject}:{chunk_idx}）
+  const meta = await kvGetJson(kv, `tb:subj:${subject}:_meta`);
+  if (meta && meta.chunks > 0) {
+    const merged = {};
+    for (let ci = 0; ci < meta.chunks; ci++) {
+      const chunk = await kvGetJson(kv, `tb:subj:${subject}:${ci}`);
+      if (chunk) Object.assign(merged, chunk);
+    }
+    if (Object.keys(merged).length > 0) {
+      _subjectCaches[subject] = merged;
+      return merged;
     }
   }
 
-  const coverage = checked > 0 ? matches.length / checked : 0;
-  return {
-    hit: matches.length > 0 && coverage >= 0.4,
-    coverage: Number(coverage.toFixed(2)),
-    matches,
-  };
+  // 回退：旧的单块格式
+  const idx = await kvGetJson(kv, `tb:subj:${subject}`);
+  if (idx) _subjectCaches[subject] = idx;
+  return idx;
+}
+
+async function getBooksMeta(kv) {
+  if (_booksCache) return _booksCache;
+  _booksCache = await kvGetJson(kv, 'tb:books');
+  return _booksCache;
+}
+
+/**
+ * 在单个学科索引中查找句子
+ */
+function searchInIndex(index, sentences) {
+  const matches = [];
+  let checked = 0;
+  for (const normed of sentences) {
+    if (normed.length < 10) continue;
+    checked++;
+    const headKey = normed.slice(0, 30);
+    const tailKey = normed.length > 30 ? normed.slice(-30) : normed;
+    const hit = index[headKey] || index[tailKey];
+    if (hit) {
+      matches.push({ bi: hit.bi, page: hit.p });
+    }
+  }
+  return { matches, checked };
+}
+
+/**
+ * 检查文本是否包含教材原句（跨学科搜索）
+ */
+export async function checkTextbookIndex(kv, text) {
+  if (!kv || !text) return { hit: false, coverage: 0, matches: [] };
+  if (!(await ensureLoaded(kv))) {
+    console.log('[TB-INDEX] ensureLoaded failed - tb:dir not found');
+    return { hit: false, coverage: 0, matches: [] };
+  }
+  console.log('[TB-INDEX] dir loaded:', Object.keys(_dirCache).length, 'subjects');
+
+  const sentences = String(text)
+    .replace(/\s+/g, '')
+    .split(/[。；！？!?]+/)
+    .map(s => normForTextbook(s))
+    .filter(s => s.length >= 10);
+  if (sentences.length === 0) return { hit: false, coverage: 0, matches: [] };
+  console.log('[TB-INDEX] sentences to check:', sentences.length);
+
+  const availableSubjects = Object.keys(_dirCache);
+  const ordered = [
+    ...SUBJECT_PRIORITY.filter(s => availableSubjects.includes(s)),
+    ...availableSubjects.filter(s => !SUBJECT_PRIORITY.includes(s)),
+  ];
+
+  let bestResult = null;
+
+  for (const subject of ordered) {
+    const index = await getSubjectIndex(kv, subject);
+    if (!index) {
+      console.log('[TB-INDEX] no index for:', subject);
+      continue;
+    }
+
+    const { matches, checked } = searchInIndex(index, sentences);
+    console.log('[TB-INDEX]', subject, 'entries:', Object.keys(index).length, 'checked:', checked, 'matched:', matches.length);
+
+    if (checked === 0) continue;
+
+    const coverage = matches.length / checked;
+    if (matches.length > 0 && coverage >= 0.4) {
+      const booksMeta = await getBooksMeta(kv);
+      const enriched = matches.map(m => ({
+        book: booksMeta?.[m.bi]?.t || '',
+        stage: booksMeta?.[m.bi]?.s || '',
+        subject: booksMeta?.[m.bi]?.sub || subject,
+        version: booksMeta?.[m.bi]?.v || '',
+        grade: booksMeta?.[m.bi]?.g || '',
+        page: m.page || 0,
+      }));
+
+      bestResult = {
+        hit: true,
+        coverage: Number(coverage.toFixed(2)),
+        subject,
+        matches: enriched,
+      };
+      break;
+    }
+  }
+
+  return bestResult || { hit: false, coverage: 0, matches: [] };
 }
 
 /**
@@ -105,7 +168,7 @@ export function textbookToWholeMatch(tbResult) {
     domain: 'textbook',
     coverage: tbResult.coverage,
     overlap: tbResult.matches.length,
-    snippet: tbResult.matches.slice(0, 3).map(x => x.original).join('\n'),
+    snippet: '',
     tier: 'textbook',
     isTextbook: true,
   };

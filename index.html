@@ -542,9 +542,9 @@ body {
       box.innerHTML = '<div class="empty-state">无结果</div>';
       return;
     }
-    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
+    var whitelist = state.whitelist || [];
     var isWhitelisted = function(url) {
-      if (!url) return false;
+      if (!url || !whitelist.length) return false;
       return whitelist.some(function(d) { return url.includes(d); });
     };
     box.innerHTML = results.map(function(r) {
@@ -1036,50 +1036,55 @@ body {
     }).join('');
   }
 
-  function kbRenderWhitelist() {
+  async function kbRenderWhitelist() {
     var body = $('kb-dialog-body');
-    // 从 KV 读取白名单（后续接后端 API）
-    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
-    $('kb-count-wl').textContent = '(' + whitelist.length + ')';
+    body.innerHTML = '<div class="loading">加载白名单...</div>';
+    try {
+      var r = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'get_whitelist' }) });
+      var whitelist = r.whitelist || [];
+      state.whitelist = whitelist;
+      $('kb-count-wl').textContent = '(' + whitelist.length + ')';
 
-    var html = '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">' +
-      '白名单中的网站在查询结果中与官方网站并列展示为权威来源（★标白名单）</div>';
+      var html = '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">' +
+        '白名单中的网站在查询结果中与官方网站并列显示为权威来源</div>';
 
-    html += '<div class="wl-add-row">' +
-      '<input type="text" id="wl-add-input" placeholder="输入域名，如：example.com" style="flex:1;padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:13px;">' +
-      '<button class="btn-primary" style="padding:6px 16px;font-size:13px;" onclick="window._wlAdd()">添加</button></div>';
+      html += '<div class="wl-add-row">' +
+        '<input type="text" id="wl-add-input" placeholder="输入域名，如：example.com" style="flex:1;padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:13px;">' +
+        '<button class="btn-primary" style="padding:6px 16px;font-size:13px;" onclick="window._wlAdd()">添加</button></div>';
 
-    if (!whitelist.length) {
-      html += '<div class="empty-state" style="padding:20px;">暂无白名单网站</div>';
-    } else {
-      html += '<div style="margin-top:12px;">' + whitelist.map(function(domain) {
-        return '<div class="wl-item"><span class="domain">' + escapeHtml(domain) + '</span>' +
-          '<button onclick="window._wlDel(\'' + escapeHtml(domain) + '\')">移除</button></div>';
-      }).join('') + '</div>';
+      if (!whitelist.length) {
+        html += '<div class="empty-state" style="padding:20px;">暂无白名单网站</div>';
+      } else {
+        html += '<div style="margin-top:12px;">' + whitelist.map(function(domain) {
+          return '<div class="wl-item"><span class="domain">' + escapeHtml(domain) + '</span>' +
+            '<button onclick="window._wlDel(\'' + escapeHtml(domain) + '\')">移除</button></div>';
+        }).join('') + '</div>';
+      }
+      body.innerHTML = html;
+
+      $('wl-add-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') window._wlAdd();
+      });
+    } catch (e) {
+      body.innerHTML = '<div class="error-msg">加载失败：' + escapeHtml(e.message) + '</div>';
     }
-    body.innerHTML = html;
-
-    $('wl-add-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') window._wlAdd();
-    });
   }
 
-  window._wlAdd = function() {
-    var input = $('wl-add-input');
-    var domain = input.value.trim().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
-    if (!domain || !domain.includes('.')) { alert('请输入有效域名'); return; }
-    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
-    if (whitelist.includes(domain)) { alert('该域名已在白名单中'); return; }
-    whitelist.push(domain);
-    localStorage.setItem('fc_whitelist', JSON.stringify(whitelist));
-    kbRenderWhitelist();
+  window._wlAdd = async function() {
+    var domain = $('wl-add-input').value.trim();
+    if (!domain) return;
+    try {
+      var r = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'add_whitelist', domain }) });
+      if (r.duplicated) { alert('该域名已在白名单中'); return; }
+      kbRenderWhitelist();
+    } catch (e) { alert('添加失败：' + e.message); }
   };
 
-  window._wlDel = function(domain) {
-    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
-    whitelist = whitelist.filter(function(d) { return d !== domain; });
-    localStorage.setItem('fc_whitelist', JSON.stringify(whitelist));
-    kbRenderWhitelist();
+  window._wlDel = async function(domain) {
+    try {
+      await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'remove_whitelist', domain }) });
+      kbRenderWhitelist();
+    } catch (e) { alert('移除失败：' + e.message); }
   };
 
   // 词条详情弹窗（可选中复制）
@@ -1128,6 +1133,12 @@ body {
     $('report-area').innerHTML = '<div class="empty-state">查证后在此显示评级与纠错建议</div>';
     state.verify = null;
   };
+
+  // 页面加载时从后端加载白名单（用于查询结果的白名单标签展示）
+  try {
+    var wlData = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'get_whitelist' }) });
+    state.whitelist = (wlData && wlData.whitelist) || [];
+  } catch { state.whitelist = []; }
 
   console.log('事实查询 已加载');
 })();

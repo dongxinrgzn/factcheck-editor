@@ -1796,15 +1796,17 @@ export async function runCheck(text, context, env, apiKey, { autoDraft = false, 
     // 整段原文直配命中信息（前端据此在结果顶部显示"整段命中出处"横幅）
     // ⚠️ 只有权威课本/官方来源命中才会出现在这里；教辅命中走下面的 referenceMatch。
     wholeMatch: wholeMatch
-      ? {
-          hit: true,
-          url: wholeMatch.url,
-          title: wholeMatch.title,
-          domain: wholeMatch.domain,
-          coverage: Number(wholeMatch.coverage.toFixed(2)),
-          snippet: wholeMatch.snippet,
-        }
-      : null,
+    ? {
+        hit: true,
+        url: wholeMatch.url,
+        title: wholeMatch.title,
+        domain: wholeMatch.domain,
+        coverage: Number(wholeMatch.coverage.toFixed ? wholeMatch.coverage.toFixed(2) : wholeMatch.coverage),
+        snippet: wholeMatch.snippet,
+        isTextbook: !!wholeMatch.isTextbook,
+        tier: wholeMatch.tier || undefined,
+      }
+    : null,
     // 教辅/题库/答案/文库站的整段命中：**只作参考出处展示**（措辞须体现"非课本"），
     // 不参与判"高"、不触发自动入库。
     referenceMatch: referenceMatch

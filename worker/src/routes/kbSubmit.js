@@ -185,6 +185,46 @@ export async function handleKbSubmit(request, env) {
     return jsonResponse({ ok: true, data: result }, 200, request);
   }
 
+  // ---- 网站白名单管理 ----
+  // 白名单中的网站在查询结果中与官方网站并列显示为权威来源
+  // 存储：KV key "wl:user" → ["domain1", "domain2", ...]
+
+  if (action === 'get_whitelist') {
+    try {
+      const raw = await env.FACT_CACHE.get('wl:user');
+      const list = raw ? JSON.parse(raw) : [];
+      return jsonResponse({ ok: true, data: { whitelist: list } }, 200, request);
+    } catch {
+      return jsonResponse({ ok: true, data: { whitelist: [] } }, 200, request);
+    }
+  }
+
+  if (action === 'add_whitelist') {
+    const { domain } = body;
+    const clean = String(domain || '').trim()
+      .replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+    if (!clean || !clean.includes('.')) {
+      return errorJson('无效域名', 400, 'BAD_REQUEST', request);
+    }
+    const raw = await env.FACT_CACHE.get('wl:user');
+    const list = raw ? JSON.parse(raw) : [];
+    if (list.includes(clean)) {
+      return jsonResponse({ ok: true, data: { whitelist: list, duplicated: true } }, 200, request);
+    }
+    list.push(clean);
+    await env.FACT_CACHE.put('wl:user', JSON.stringify(list));
+    return jsonResponse({ ok: true, data: { whitelist: list } }, 200, request);
+  }
+
+  if (action === 'remove_whitelist') {
+    const { domain } = body;
+    const raw = await env.FACT_CACHE.get('wl:user');
+    let list = raw ? JSON.parse(raw) : [];
+    list = list.filter(d => d !== domain);
+    await env.FACT_CACHE.put('wl:user', JSON.stringify(list));
+    return jsonResponse({ ok: true, data: { whitelist: list } }, 200, request);
+  }
+
   // 手动入库：用户点击"入库"按钮，直接审核通过入库（不经过待审队列）
   if (action === 'manual_store') {
     const { card } = body;

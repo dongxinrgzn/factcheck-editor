@@ -151,19 +151,44 @@ function penaltyScore(domain, content) {
   return p;
 }
 
+// 用户自定义白名单（KV 存储，Isolate 缓存）
+let _userWhitelistCache = null;
+let _userWhitelistAt = 0;
+const USER_WL_TTL = 60 * 1000; // 1 分钟缓存
+
 /**
- * 计算官方性评分
- * @param {string} url - 结果 URL
- * @param {string} content - 结果摘要/正文
- * @param {object} env - Worker env（含 OFFICIAL_WHITELIST）
- * @returns {{score: number, tag: boolean}}
+ * 获取用户自定义白名单（从 KV 加载，Isolate 缓存）
+ * 白名单中的网站与官方网站并列显示为权威来源
  */
-export function officialScore(url, content = '', env = null) {
+async function getUserWhitelist(env) {
+  if (!env || !env.FACT_CACHE) return [];
+  const now = Date.now();
+  if (_userWhitelistCache && (now - _userWhitelistAt) < USER_WL_TTL) {
+    return _userWhitelistCache;
+  }
+  try {
+    const raw = await env.FACT_CACHE.get('wl:user');
+    const list = raw ? JSON.parse(raw) : [];
+    _userWhitelistCache = Array.isArray(list) ? list : [];
+    _userWhitelistAt = now;
+    return _userWhitelistCache;
+  } catch {
+    return _userWhitelistCache || [];
+  }
+}
+
+/**
+ * 计算官方性评分（支持用户白名单）
+ */
+export async function officialScoreAsync(url, content = '', env = null) {
   const domain = extractDomain(url);
   const whitelist = getWhitelist(env);
+  const userWl = await getUserWhitelist(env);
+
   let score = 0;
+  let tag = false;
+
   if (isEncyclopedia(domain)) {
-    // 百科：权威参考来源，但不是政府官方——给中等可信分，不打官方标签
     score = 0.5;
   } else {
     score += tldScore(domain);
@@ -171,7 +196,52 @@ export function officialScore(url, content = '', env = null) {
     score += primarySourceBonus(content);
     score += penaltyScore(domain, content);
   }
-  // 封顶 [0, 1]
+
+  // 用户白名单：与官方站并列权威
+  const userHit = userWl.some(w => domain === w || domain.endsWith('.' + w));
+  if (userHit) {
+    score = Math.max(score, 0.9); // 至少 0.9（与官方站同级）
+    tag = true;
+  }
+
+  score = Math.max(0, Math.min(1, score));
+  return { score: Number(score.toFixed(2)), tag, whitelisted: userHit };
+}
+
+/**
+ * 批量给检索结果打官方性标签（异步版，支持用户白名单）
+ */
+export async function annotateResultsAsync(results, env = null) {
+  const list = Array.isArray(results) ? results : [];
+  const out = [];
+  for (const r of list) {
+    if (!r || !r.url) { out.push(r); continue; }
+    const { score, tag, whitelisted } = await officialScoreAsync(r.url, r.snippet || r.content || '', env);
+    out.push({
+      ...r,
+      official_score: score,
+      official_tag: tag,
+      whitelisted: whitelisted || undefined,
+    });
+  }
+  return out;
+}
+
+/**
+ * 计算官方性评分（同步版，向后兼容）
+ */
+export function officialScore(url, content = '', env = null) {
+  const domain = extractDomain(url);
+  const whitelist = getWhitelist(env);
+  let score = 0;
+  if (isEncyclopedia(domain)) {
+    score = 0.5;
+  } else {
+    score += tldScore(domain);
+    score += whitelistBonus(domain, whitelist);
+    score += primarySourceBonus(content);
+    score += penaltyScore(domain, content);
+  }
   score = Math.max(0, Math.min(1, score));
   return { score: Number(score.toFixed(2)), tag: score >= 0.7 };
 }

@@ -281,6 +281,48 @@ body {
   .topbar { flex-wrap:wrap; }
   .topbar input { width:140px; }
 }
+
+/* ==================== 知识库管理弹窗 ==================== */
+.kb-overlay {
+  position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.5); z-index:999;
+  display:flex; align-items:center; justify-content:center;
+}
+.kb-dialog {
+  background:#fff; border-radius:var(--radius-lg); max-width:700px; width:90%; max-height:85vh;
+  overflow:hidden; display:flex; flex-direction:column; box-shadow:0 4px 20px rgba(0,0,0,.3);
+}
+.kb-dialog .header {
+  padding:var(--sp-4) var(--sp-5); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:var(--sp-3);
+}
+.kb-dialog .header h3 { font-size:var(--fs-lg); font-weight:700; flex:1; }
+.kb-dialog .tabs {
+  display:flex; gap:0; border-bottom:1px solid var(--border); padding:0 var(--sp-2);
+}
+.kb-dialog .tab {
+  padding:var(--sp-2) var(--sp-4); font-size:var(--fs-base); font-weight:500; color:var(--text-secondary);
+  border-bottom:2px solid transparent; cursor:pointer; transition:all .15s;
+}
+.kb-dialog .tab:hover { color:var(--text-primary); background:var(--gray-50); }
+.kb-dialog .tab.active { color:var(--action); border-bottom-color:var(--action); font-weight:600; }
+.kb-dialog .tab .count { font-size:var(--fs-xs); color:var(--text-tertiary); margin-left:var(--sp-1); }
+.kb-dialog .body { flex:1; overflow-y:auto; padding:var(--sp-4); }
+.kb-dialog .footer {
+  padding:var(--sp-3) var(--sp-5); border-top:1px solid var(--border); display:flex; gap:var(--sp-2); align-items:center;
+}
+
+/* 白名单管理 */
+.wl-section { margin-top:var(--sp-5); padding-top:var(--sp-4); border-top:1px solid var(--border-subtle); }
+.wl-section h4 { font-size:var(--fs-base); font-weight:600; margin-bottom:var(--sp-2); color:var(--text-primary); }
+.wl-item {
+  display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-1) var(--sp-3);
+  border:1px solid var(--border-subtle); border-radius:var(--radius-sm); margin-bottom:var(--sp-1);
+  font-size:var(--fs-sm); background:var(--gray-50);
+}
+.wl-item .domain { flex:1; color:var(--text-primary); font-weight:500; }
+.wl-item button { padding:2px var(--sp-2); font-size:var(--fs-xs); border:1px solid var(--gray-300); border-radius:var(--radius-sm); background:#fff; cursor:pointer; color:var(--red-700); }
+.wl-item button:hover { background:var(--error-bg); }
+.wl-add-row { display:flex; gap:var(--sp-2); margin-top:var(--sp-2); }
+.wl-add-row input { flex:1; padding:var(--sp-1) var(--sp-3); border:1px solid var(--gray-300); border-radius:var(--radius-sm); font-size:var(--fs-sm); }
 </style>
 </head>
 <body>
@@ -288,6 +330,7 @@ body {
 <div class="topbar">
   <h1>事实查询</h1>
   <div class="config">
+    <button class="btn-secondary" id="btn-open-kb" style="font-weight:600;">知识库</button>
     <input type="text" id="cfg-url" placeholder="后端地址">
     <input type="text" id="cfg-key" placeholder="Worker Key">
     <button id="btn-save-cfg">保存</button>
@@ -311,16 +354,6 @@ body {
         <button class="btn-secondary" id="btn-clear">清空</button>
       </div>
     </div>
-    <div class="kb-entry-list">
-      <h3>知识库 · 已入库词条
-        <button class="btn-secondary" id="btn-refresh-kb" style="font-size:12px;padding:2px 8px;float:right;">刷新</button>
-      </h3>
-      <div style="display:flex;gap:4px;margin-bottom:8px;">
-        <input type="text" id="kb-search-input" placeholder="搜索词条..." style="flex:1;font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;">
-        <button class="btn-secondary" id="btn-kb-search" style="font-size:12px;padding:4px 8px;">搜索</button>
-      </div>
-      <div id="kb-list"><div class="empty-state">点"刷新"加载</div></div>
-    </div>
   </div>
 
   <!-- 中栏 -->
@@ -333,6 +366,29 @@ body {
   <div class="panel">
     <h2>核查报告</h2>
     <div id="report-area"><div class="empty-state">查证后在此显示评级与纠错建议</div></div>
+  </div>
+</div>
+
+<!-- 知识库管理弹窗 -->
+<div class="kb-overlay" id="kb-overlay" style="display:none;">
+  <div class="kb-dialog">
+    <div class="header">
+      <h3>知识库管理</h3>
+      <button class="btn-secondary" id="btn-kb-refresh">刷新</button>
+      <button class="btn-secondary" id="btn-kb-close">关闭</button>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-tab="auto">自动审核 <span class="count" id="kb-count-auto"></span></div>
+      <div class="tab" data-tab="manual">人工审核 <span class="count" id="kb-count-manual"></span></div>
+      <div class="tab" data-tab="whitelist">网站白名单 <span class="count" id="kb-count-wl"></span></div>
+    </div>
+    <div class="body" id="kb-dialog-body">
+      <!-- 动态渲染 -->
+    </div>
+    <div class="footer">
+      <input type="text" id="kb-search-input" placeholder="搜索词条标题..." style="flex:1;padding:4px 8px;border:1px solid var(--gray-300);border-radius:4px;font-size:13px;">
+      <button class="btn-secondary" id="btn-kb-search">搜索</button>
+    </div>
   </div>
 </div>
 
@@ -486,10 +542,18 @@ body {
       box.innerHTML = '<div class="empty-state">无结果</div>';
       return;
     }
+    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
+    var isWhitelisted = function(url) {
+      if (!url) return false;
+      return whitelist.some(function(d) { return url.includes(d); });
+    };
     box.innerHTML = results.map(function(r) {
+      var whitelisted = isWhitelisted(r.url);
       var tag = r.official_tag
         ? '<span class="tag-official">★官方</span>'
-        : '<span class="tag-unofficial">待甄别</span>';
+        : whitelisted
+          ? '<span class="tag-official" style="background:var(--blue-50);color:var(--blue-700);border-color:var(--blue-100);">★白名单</span>'
+          : '<span class="tag-unofficial">待甄别</span>';
       var site = r.site_name ? '<span style="color:#0a7d32;font-size:12px;font-weight:600;margin-right:6px;">[' + escapeHtml(r.site_name) + ']</span>' : '';
       var snippet = (r.snippet || '').slice(0, 200);
       var mirror = mirrorLink(r.url);
@@ -903,104 +967,159 @@ body {
     renderQueryReport(qd);
   }
 
-  // ==================== 知识库管理 ====================
-  async function loadKbList(keyword) {
+  // ==================== 知识库管理弹窗 ====================
+  var kbTab = 'auto';
+  var kbItems = [];
+
+  $('btn-open-kb').onclick = function() {
+    $('kb-overlay').style.display = 'flex';
+    kbLoadTab();
+  };
+  $('btn-kb-close').onclick = function() { $('kb-overlay').style.display = 'none'; };
+  $('kb-overlay').onclick = function(e) { if (e.target === this) this.style.display = 'none'; };
+  $('btn-kb-refresh').onclick = function() { kbLoadTab(); };
+  $('btn-kb-search').onclick = function() { kbLoadTab($('kb-search-input').value); };
+  $('kb-search-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') kbLoadTab(this.value); });
+
+  document.querySelectorAll('.kb-dialog .tab').forEach(function(tab) {
+    tab.onclick = function() {
+      document.querySelectorAll('.kb-dialog .tab').forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      kbTab = tab.dataset.tab;
+      kbRenderBody();
+    };
+  });
+
+  async function kbLoadTab(keyword) {
+    var body = $('kb-dialog-body');
+    body.innerHTML = '<div class="loading">加载中...</div>';
     try {
-      var r;
-      if (keyword && keyword.trim()) {
-        r = await apiFetch('/api/kb/submit', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'search', keyword: keyword.trim() })
-        });
-      } else {
-        r = await apiFetch('/api/kb/submit', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'list_verified' })
-        });
-      }
-      var items = r.items || [];
-      var box = $('kb-list');
-      if (!items.length) {
-        box.innerHTML = '<div class="empty-state">' + (keyword ? '未搜到' : '知识库暂无词条') + '</div>';
+      if (kbTab === 'whitelist') {
+        kbRenderWhitelist();
         return;
       }
-      box.innerHTML = items.map(function(it) {
-        var st = it.status === 'auto_verified' ? '自动审核' : '人工审核';
-        return '<div class="result-item" style="margin-bottom:6px;">' +
-          '<div class="title">' + escapeHtml(it.title || '') +
-          ' <span style="font-size:10px;color:#888;background:#e8f5e9;padding:1px 4px;border-radius:3px;">' + st + '</span>' +
-          ' <span style="font-size:11px;color:#888;">' + (it.fact_count || 0) + '条</span>' +
-          ' <button class="btn-secondary" style="font-size:11px;padding:1px 6px;margin-left:4px;" onclick="window._viewKb(\'' + escapeHtml(it.id) + '\')">详情</button>' +
-          ' <button class="btn-secondary" style="font-size:11px;padding:1px 6px;color:#c62828;" onclick="window._delKb(\'' + escapeHtml(it.id) + '\',\'' + escapeHtml(it.title || '') + '\')">删除</button>' +
-          '</div></div>';
-      }).join('');
+      var r;
+      if (keyword && keyword.trim()) {
+        r = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'search', keyword: keyword.trim() }) });
+      } else {
+        r = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'list_verified' }) });
+      }
+      kbItems = r.items || [];
+      kbRenderBody();
     } catch (e) {
-      $('kb-list').innerHTML = '<div class="error-msg">加载失败：' + escapeHtml(e.message) + '</div>';
+      body.innerHTML = '<div class="error-msg">加载失败：' + escapeHtml(e.message) + '</div>';
     }
   }
 
+  function kbRenderBody() {
+    var body = $('kb-dialog-body');
+    if (kbTab === 'whitelist') { kbRenderWhitelist(); return; }
+    var statusKey = kbTab === 'auto' ? 'auto_verified' : 'verified';
+    var filtered = kbItems.filter(function(it) { return it.status === statusKey; });
+    var otherCount = kbItems.length - filtered.length;
+
+    $('kb-count-auto').textContent = '(' + kbItems.filter(function(i){return i.status==='auto_verified'}).length + ')';
+    $('kb-count-manual').textContent = '(' + kbItems.filter(function(i){return i.status==='verified'}).length + ')';
+
+    if (!filtered.length) {
+      body.innerHTML = '<div class="empty-state">' + (kbTab === 'auto' ? '暂无自动审核词条' : '暂无人工审核词条') + '</div>';
+      return;
+    }
+    body.innerHTML = filtered.map(function(it) {
+      return '<div class="result-item" style="margin-bottom:6px;">' +
+        '<div class="title">' + escapeHtml(it.title || '') +
+        ' <span style="font-size:11px;color:#888;">' + (it.fact_count || 0) + '条事实</span>' +
+        ' <span style="font-size:10px;color:#888;">v' + (it.version || 1) + '</span>' +
+        ' <button class="btn-secondary" style="font-size:11px;padding:1px 8px;margin-left:4px;" onclick="window._viewKb(\'' + escapeHtml(it.id) + '\')">查看</button>' +
+        ' <button class="btn-secondary" style="font-size:11px;padding:1px 8px;color:#dc2626;" onclick="window._delKb(\'' + escapeHtml(it.id) + '\',\'' + escapeHtml(it.title || '') + '\')">删除</button>' +
+        '</div></div>';
+    }).join('');
+  }
+
+  function kbRenderWhitelist() {
+    var body = $('kb-dialog-body');
+    // 从 KV 读取白名单（后续接后端 API）
+    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
+    $('kb-count-wl').textContent = '(' + whitelist.length + ')';
+
+    var html = '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">' +
+      '白名单中的网站在查询结果中与官方网站并列展示为权威来源（★标白名单）</div>';
+
+    html += '<div class="wl-add-row">' +
+      '<input type="text" id="wl-add-input" placeholder="输入域名，如：example.com" style="flex:1;padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:13px;">' +
+      '<button class="btn-primary" style="padding:6px 16px;font-size:13px;" onclick="window._wlAdd()">添加</button></div>';
+
+    if (!whitelist.length) {
+      html += '<div class="empty-state" style="padding:20px;">暂无白名单网站</div>';
+    } else {
+      html += '<div style="margin-top:12px;">' + whitelist.map(function(domain) {
+        return '<div class="wl-item"><span class="domain">' + escapeHtml(domain) + '</span>' +
+          '<button onclick="window._wlDel(\'' + escapeHtml(domain) + '\')">移除</button></div>';
+      }).join('') + '</div>';
+    }
+    body.innerHTML = html;
+
+    $('wl-add-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') window._wlAdd();
+    });
+  }
+
+  window._wlAdd = function() {
+    var input = $('wl-add-input');
+    var domain = input.value.trim().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+    if (!domain || !domain.includes('.')) { alert('请输入有效域名'); return; }
+    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
+    if (whitelist.includes(domain)) { alert('该域名已在白名单中'); return; }
+    whitelist.push(domain);
+    localStorage.setItem('fc_whitelist', JSON.stringify(whitelist));
+    kbRenderWhitelist();
+  };
+
+  window._wlDel = function(domain) {
+    var whitelist = JSON.parse(localStorage.getItem('fc_whitelist') || '[]');
+    whitelist = whitelist.filter(function(d) { return d !== domain; });
+    localStorage.setItem('fc_whitelist', JSON.stringify(whitelist));
+    kbRenderWhitelist();
+  };
+
+  // 词条详情弹窗（可选中复制）
   window._viewKb = async function(slug) {
     try {
-      var r = await apiFetch('/api/kb/submit', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'get', slug: slug })
-      });
+      var r = await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'get', slug: slug }) });
       var card = r.card;
       if (!card) { alert('词条不存在'); return; }
-      // 可选中、可复制的详情弹窗
-      var factsHtml = (card.facts || []).map(function(f, i) {
+      var factsHtml = (card.facts || []).map(function(f) {
         var src = f.source || {};
-        var srcLink = src.url
-          ? ' <a href="' + escapeHtml(src.url) + '" target="_blank" style="color:#0366d6;font-size:12px;text-decoration:underline;">' + escapeHtml(src.name || '来源') + ' ↗</a>'
-          : '';
+        var srcLink = src.url ? ' <a href="' + escapeHtml(src.url) + '" target="_blank" style="color:#0366d6;font-size:12px;text-decoration:underline;">' + escapeHtml(src.name || '来源') + ' ↗</a>' : '';
         return '<div style="padding:6px 0;border-bottom:1px dashed #e1e4e8;">' +
           '<span style="font-weight:600;color:#0366d6;">' + escapeHtml(f.label || '') + '</span>' +
           '<span style="color:#888;font-size:11px;margin-left:4px;">[' + escapeHtml(f.rating || '?') + ']</span>' +
           '<div style="margin:2px 0;user-select:text;-webkit-user-select:text;cursor:text;">' + escapeHtml(f.value || '') + '</div>' +
-          '<div style="font-size:12px;color:#888;">' + escapeHtml(src.name || '') + srcLink + '</div>' +
-          '</div>';
+          '<div style="font-size:12px;color:#888;">' + escapeHtml(src.name || '') + srcLink + '</div></div>';
       }).join('');
-      var refsHtml = (card.references || []).map(function(r2) {
-        return '<a href="' + escapeHtml(r2.url || '#') + '" target="_blank" style="color:#0366d6;font-size:12px;margin-right:8px;text-decoration:underline;">[' + escapeHtml(r2.name || '') + '] ↗</a>';
-      }).join('');
-      // 弹窗
       var overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999;display:flex;align-items:center;justify-content:center;';
+      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;';
       overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
       var dialog = document.createElement('div');
       dialog.style.cssText = 'background:#fff;border-radius:8px;max-width:600px;max-height:80vh;overflow-y:auto;padding:20px;box-shadow:0 4px 20px rgba(0,0,0,.3);';
       dialog.innerHTML =
         '<div style="display:flex;align-items:center;margin-bottom:12px;">' +
-        '<h3 style="font-size:16px;flex:1;user-select:text;-webkit-user-select:text;cursor:text;">' + escapeHtml(card.title || '') + '</h3>' +
-        '<button style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:13px;" onclick="this.closest(\'div[style*=fixed]\').remove()">关闭</button>' +
-        '</div>' +
-        '<div style="font-size:12px;color:#888;margin-bottom:10px;">状态：' + escapeHtml(card.status || '') +
-        ' | 版本：v' + (card.version || 1) +
-        ' | 更新：' + escapeHtml(card.updated_at || '') + '</div>' +
-        '<div style="font-size:14px;font-weight:600;margin-bottom:6px;">事实（' + (card.facts || []).length + ' 条，可直接选中复制）</div>' +
-        factsHtml +
-        (refsHtml ? '<div style="margin-top:12px;"><div style="font-size:13px;font-weight:600;margin-bottom:4px;">参考来源</div>' + refsHtml + '</div>' : '');
+        '<h3 style="font-size:16px;flex:1;user-select:text;">' + escapeHtml(card.title || '') + '</h3>' +
+        '<button style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;" onclick="this.closest(\'div[style*=fixed]\').remove()">关闭</button></div>' +
+        '<div style="font-size:12px;color:#888;margin-bottom:10px;">状态：' + escapeHtml(card.status || '') + ' | v' + (card.version || 1) + ' | ' + escapeHtml(card.updated_at || '') + '</div>' +
+        '<div style="font-size:14px;font-weight:600;margin-bottom:6px;">事实（' + (card.facts || []).length + ' 条，可选中复制）</div>' + factsHtml;
       overlay.appendChild(dialog);
       document.body.appendChild(overlay);
     } catch (e) { alert('查看失败：' + e.message); }
   };
 
   window._delKb = async function(slug, title) {
-    if (!confirm('确认删除词条"' + title + '"？\n此操作不可恢复。')) return;
+    if (!confirm('确认删除词条"' + title + '"？')) return;
     try {
-      await apiFetch('/api/kb/submit', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'delete', slug: slug })
-      });
-      loadKbList('');
+      await apiFetch('/api/kb/submit', { method: 'POST', body: JSON.stringify({ action: 'delete', slug: slug }) });
+      kbLoadTab();
     } catch (e) { alert('删除失败：' + e.message); }
   };
-
-  $('btn-refresh-kb').onclick = function() { loadKbList(''); };
-  $('btn-kb-search').onclick = function() { loadKbList($('kb-search-input').value); };
-  $('kb-search-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') loadKbList(this.value);
-  });
 
   // 清空
   $('btn-clear').onclick = function() {
@@ -1009,9 +1128,6 @@ body {
     $('report-area').innerHTML = '<div class="empty-state">查证后在此显示评级与纠错建议</div>';
     state.verify = null;
   };
-
-  // 页面加载时自动加载知识库列表
-  loadKbList('');
 
   console.log('事实查询 已加载');
 })();
